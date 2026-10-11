@@ -1,0 +1,23 @@
+{
+  "name": "@kept/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist"],
+  "scripts": {
+    "dev": "tsx watch --conditions=development --env-file=../../.env src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@kept/db": "workspace:*",
+    "@kept/shared": "workspace:*",
+    "bullmq": "^6.3.12",
+    "ioredis": "^6.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  }
+}

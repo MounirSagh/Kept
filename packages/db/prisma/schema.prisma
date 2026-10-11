@@ -1,0 +1,805 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Platform-wide superusers are `User.isPlatformAdmin`, not an org role.
+enum OrgRole {
+  owner
+  manager
+  member
+}
+
+enum InvitationStatus {
+  pending
+  accepted
+  revoked
+  expired
+}
+
+model User {
+  id          String   @id @default(uuid()) @db.Uuid
+  clerkUserId String   @unique @map("clerk_user_id")
+  email       String   @unique
+  fullName    String?  @map("full_name")
+  avatarUrl       String?  @map("avatar_url")
+  preferences     Json     @default("{}")
+  isPlatformAdmin Boolean  @default(false) @map("is_platform_admin")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  memberships           Membership[]
+  invitationsSent       Invitation[]     @relation("InvitedBy")
+  personalConnections   Connection[]     @relation("PersonalConnection")
+  connectionsCreated    Connection[]     @relation("ConnectedBy")
+  ownedAccounts         Account[]        @relation("AccountOwner")
+  accountMemberships    AccountMember[]
+  ownedItems            ExtractedItem[]  @relation("ItemOwner")
+  requestedRuns         AgentRun[]       @relation("RunRequester")
+  resolvedFlags         Flag[]           @relation("FlagResolver")
+  decidedActions        ProposedAction[] @relation("ActionDecider")
+  reminders             Reminder[]
+  conversations         Conversation[]
+  privateSourceItems    SourceItem[]     @relation("SourceItemVisibleTo")
+  privateExtractedItems ExtractedItem[]  @relation("ExtractedItemVisibleTo")
+  privateAgentRuns      AgentRun[]       @relation("AgentRunVisibleTo")
+  privateFlags          Flag[]           @relation("FlagVisibleTo")
+  privateBriefs         Brief[]          @relation("BriefVisibleTo")
+  privateActions        ProposedAction[] @relation("ProposedActionVisibleTo")
+
+  @@map("users")
+}
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  memberships     Membership[]
+  teams           Team[]
+  invitations     Invitation[]
+  connections     Connection[]
+  accounts        Account[]
+  contacts        Contact[]
+  sourceItems     SourceItem[]
+  extractedItems  ExtractedItem[]
+  agentRuns       AgentRun[]
+  flags           Flag[]
+  briefs          Brief[]
+  proposedActions ProposedAction[]
+  reminders       Reminder[]
+  conversations   Conversation[]
+  worldEvents     WorldEvent[]
+  worldAudit      WorldAuditEntry[]
+  worldState      WorldState?
+
+  @@map("organizations")
+}
+
+model Team {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  memberships Membership[]
+  invitations Invitation[]
+
+  @@unique([id, orgId])
+  @@unique([orgId, name])
+  @@map("teams")
+}
+
+model Membership {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  role      OrgRole  @default(member)
+  teamId    String?  @map("team_id") @db.Uuid
+  joinedAt  DateTime @default(now()) @map("joined_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  team Team?        @relation(fields: [teamId, orgId], references: [id, orgId], onDelete: NoAction)
+
+  @@unique([orgId, userId])
+  @@index([userId])
+  @@index([teamId])
+  @@map("memberships")
+}
+
+model Invitation {
+  id          String           @id @default(uuid()) @db.Uuid
+  orgId       String           @map("org_id") @db.Uuid
+  email       String
+  role        OrgRole          @default(member)
+  teamId      String?          @map("team_id") @db.Uuid
+  tokenHash   String           @unique @map("token_hash")
+  status      InvitationStatus @default(pending)
+  invitedById String?          @map("invited_by_id") @db.Uuid
+  expiresAt   DateTime         @map("expires_at")
+  acceptedAt  DateTime?        @map("accepted_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  invitedBy User?        @relation("InvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+  team      Team?        @relation(fields: [teamId, orgId], references: [id, orgId], onDelete: NoAction)
+
+  @@index([orgId, status])
+  @@index([teamId])
+  @@index([email])
+  @@index([invitedById])
+  @@map("invitations")
+}
+
+enum Provider {
+  gmail
+  outlook
+  slack
+  teams
+  hubspot
+  gdrive
+  zendesk
+  calendar
+}
+
+enum ConnectionStatus {
+  active
+  expired
+  revoked
+  error
+}
+
+model Connection {
+  id                String           @id @default(uuid()) @db.Uuid
+  orgId             String           @map("org_id") @db.Uuid
+  provider          Provider
+  ownerUserId       String?          @map("owner_user_id") @db.Uuid
+  connectedById     String?          @map("connected_by_id") @db.Uuid
+  externalAccountId String           @map("external_account_id")
+  accessTokenEnc    Bytes?           @map("access_token_enc")
+  refreshTokenEnc   Bytes?           @map("refresh_token_enc")
+  tokenKeyVersion   Int?             @map("token_key_version") @db.SmallInt
+  tokenExpiresAt    DateTime?        @map("token_expires_at")
+  scopes            String[]
+  status            ConnectionStatus @default(active)
+  syncCursor        String?          @map("sync_cursor")
+  lastSyncedAt      DateTime?        @map("last_synced_at")
+  createdAt         DateTime         @default(now()) @map("created_at")
+  updatedAt         DateTime         @updatedAt @map("updated_at")
+
+  org           Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  owner         User?          @relation("PersonalConnection", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  connectedBy   User?          @relation("ConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
+  webhookEvents WebhookEvent[]
+  sourceItems   SourceItem[]
+
+  @@unique([id, orgId])
+  @@unique([orgId, provider, externalAccountId])
+  @@index([ownerUserId])
+  @@index([connectedById])
+  @@map("connections")
+}
+
+model WebhookEvent {
+  id              String    @id @default(uuid()) @db.Uuid
+  connectionId    String    @map("connection_id") @db.Uuid
+  externalEventId String    @map("external_event_id")
+  payload         Json
+  receivedAt      DateTime  @default(now()) @map("received_at")
+  processedAt     DateTime? @map("processed_at")
+
+  connection Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@unique([connectionId, externalEventId])
+  @@map("webhook_events")
+}
+
+enum AccountMemberRole {
+  owner
+  member
+  viewer
+}
+
+model Account {
+  id               String    @id @default(uuid()) @db.Uuid
+  orgId            String    @map("org_id") @db.Uuid
+  name             String
+  domain           String?
+  crmExternalId    String?   @map("crm_external_id")
+  ownerUserId      String?   @map("owner_user_id") @db.Uuid
+  annualValueCents BigInt?   @map("annual_value_cents")
+  currency         String?   @db.Char(3)
+  renewalDate      DateTime? @map("renewal_date") @db.Date
+  healthScore      Int?      @map("health_score") @db.SmallInt
+  worldModelRef    String?   @map("world_model_ref")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  deletedAt        DateTime? @map("deleted_at")
+
+  org             Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  owner           User?            @relation("AccountOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  members         AccountMember[]
+  contacts        Contact[]
+  sourceItems     SourceItem[]
+  extractedItems  ExtractedItem[]
+  agentRuns       AgentRun[]
+  flags           Flag[]
+  briefs          Brief[]
+  proposedActions ProposedAction[]
+  reminders       Reminder[]
+  conversations   Conversation[]
+
+  @@unique([id, orgId])
+  @@index([orgId, domain])
+  @@index([orgId, renewalDate])
+  @@index([ownerUserId])
+  @@map("accounts")
+}
+
+model AccountMember {
+  accountId String            @map("account_id") @db.Uuid
+  userId    String            @map("user_id") @db.Uuid
+  role      AccountMemberRole @default(member)
+
+  account Account @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([accountId, userId])
+  @@index([userId])
+  @@map("account_members")
+}
+
+model Contact {
+  id            String    @id @default(uuid()) @db.Uuid
+  orgId         String    @map("org_id") @db.Uuid
+  accountId     String?   @map("account_id") @db.Uuid
+  fullName      String?   @map("full_name")
+  email         String?
+  title         String?
+  isActive      Boolean   @default(true) @map("is_active")
+  worldModelRef String?   @map("world_model_ref")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+  deletedAt     DateTime? @map("deleted_at")
+
+  org     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account Account?     @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+
+  @@index([orgId, email])
+  @@index([accountId])
+  @@map("contacts")
+}
+
+enum SourceKind {
+  email
+  message
+  document
+  ticket
+  deal
+  invoice
+  transcript
+  event
+}
+
+model SourceItem {
+  id              String     @id @default(uuid()) @db.Uuid
+  orgId           String     @map("org_id") @db.Uuid
+  connectionId    String     @map("connection_id") @db.Uuid
+  accountId       String?    @map("account_id") @db.Uuid
+  kind            SourceKind
+  externalId      String     @map("external_id")
+  url             String?
+  title           String?
+  author          String?
+  occurredAt      DateTime   @map("occurred_at")
+  contentText     String?    @map("content_text")
+  contentHash     String     @map("content_hash")
+  visibleToUserId String?    @map("visible_to_user_id") @db.Uuid
+  metadata        Json       @default("{}")
+  ingestedAt      DateTime   @default(now()) @map("ingested_at")
+  deletedAt       DateTime?  @map("deleted_at")
+
+  org              Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  connection       Connection        @relation(fields: [connectionId, orgId], references: [id, orgId], onDelete: Cascade)
+  account          Account?          @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+  visibleTo        User?             @relation("SourceItemVisibleTo", fields: [visibleToUserId], references: [id], onDelete: Cascade)
+  extractedItems   ExtractedItem[]
+  flagEvidence     FlagEvidence[]
+  briefCitations   BriefCitation[]
+  messageCitations MessageCitation[]
+
+  @@unique([id, orgId])
+  @@unique([connectionId, externalId])
+  @@index([accountId, occurredAt(sort: Desc)])
+  @@index([orgId])
+  @@index([visibleToUserId])
+  @@map("source_items")
+}
+
+enum ItemType {
+  commitment
+  obligation
+  decision
+  deadline
+  preference
+  risk
+}
+
+enum ItemStatus {
+  open
+  fulfilled
+  broken
+  unknown
+  superseded
+}
+
+model ExtractedItem {
+  id              String     @id @default(uuid()) @db.Uuid
+  orgId           String     @map("org_id") @db.Uuid
+  accountId       String?    @map("account_id") @db.Uuid
+  type            ItemType
+  summary         String
+  details         Json       @default("{}")
+  madeBy          String?    @map("made_by")
+  ownerUserId     String?    @map("owner_user_id") @db.Uuid
+  dueDate         DateTime?  @map("due_date") @db.Date
+  status          ItemStatus @default(open)
+  confidence      Decimal?   @db.Decimal(3, 2)
+  sourceItemId    String     @map("source_item_id") @db.Uuid
+  sourceExcerpt   String?    @map("source_excerpt")
+  visibleToUserId String?    @map("visible_to_user_id") @db.Uuid
+  worldModelRef   String?    @map("world_model_ref")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+  deletedAt       DateTime?  @map("deleted_at")
+
+  org          Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account      Account?       @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+  owner        User?          @relation("ItemOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  sourceItem   SourceItem     @relation(fields: [sourceItemId, orgId], references: [id, orgId], onDelete: NoAction)
+  visibleTo    User?          @relation("ExtractedItemVisibleTo", fields: [visibleToUserId], references: [id], onDelete: Cascade)
+  flagEvidence FlagEvidence[]
+  reminders    Reminder[]
+
+  @@unique([id, orgId])
+  @@index([accountId, type, status])
+  @@index([orgId, dueDate])
+  @@index([sourceItemId])
+  @@index([ownerUserId])
+  @@index([visibleToUserId])
+  @@map("extracted_items")
+}
+
+enum TriggerType {
+  new_data
+  schedule
+  meeting
+  chat
+  manual
+}
+
+enum RunStatus {
+  queued
+  running
+  completed
+  failed
+  cancelled
+}
+
+enum AgentName {
+  planner
+  investigator
+  critic
+  advisor
+  executor
+}
+
+enum CriticVerdict {
+  approved
+  needs_evidence
+  rejected
+}
+
+model AgentRun {
+  id               String      @id @default(uuid()) @db.Uuid
+  orgId            String      @map("org_id") @db.Uuid
+  accountId        String?     @map("account_id") @db.Uuid
+  trigger          TriggerType
+  triggerRef       String?     @map("trigger_ref")
+  requestedById    String?     @map("requested_by_id") @db.Uuid
+  visibleToUserId  String?     @map("visible_to_user_id") @db.Uuid
+  status           RunStatus   @default(queued)
+  plan             Json?
+  criticIterations Int         @default(0) @map("critic_iterations") @db.SmallInt
+  inputTokens      Int         @default(0) @map("input_tokens")
+  outputTokens     Int         @default(0) @map("output_tokens")
+  costUsd          Decimal     @default(0) @map("cost_usd") @db.Decimal(10, 4)
+  langsmithTraceId String?     @map("langsmith_trace_id")
+  error            String?
+  startedAt        DateTime?   @map("started_at")
+  finishedAt       DateTime?   @map("finished_at")
+  createdAt        DateTime    @default(now()) @map("created_at")
+  updatedAt        DateTime    @updatedAt @map("updated_at")
+
+  org             Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account         Account?         @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+  requestedBy     User?            @relation("RunRequester", fields: [requestedById], references: [id], onDelete: SetNull)
+  visibleTo       User?            @relation("AgentRunVisibleTo", fields: [visibleToUserId], references: [id], onDelete: Cascade)
+  steps           AgentStep[]
+  flags           Flag[]
+  briefs          Brief[]
+  proposedActions ProposedAction[]
+  messages        Message[]
+
+  @@unique([id, orgId])
+  @@index([accountId, createdAt(sort: Desc)])
+  @@index([orgId, status])
+  @@index([requestedById])
+  @@index([visibleToUserId])
+  @@map("agent_runs")
+}
+
+model AgentStep {
+  id           String         @id @default(uuid()) @db.Uuid
+  runId        String         @map("run_id") @db.Uuid
+  stepIndex    Int            @map("step_index")
+  agent        AgentName
+  action       String
+  inputSummary String?        @map("input_summary")
+  output       Json?
+  verdict      CriticVerdict?
+  inputTokens  Int            @default(0) @map("input_tokens")
+  outputTokens Int            @default(0) @map("output_tokens")
+  costUsd      Decimal        @default(0) @map("cost_usd") @db.Decimal(10, 4)
+  durationMs   Int?           @map("duration_ms")
+  status       RunStatus      @default(completed)
+  createdAt    DateTime       @default(now()) @map("created_at")
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, stepIndex])
+  @@map("agent_steps")
+}
+
+enum FlagKind {
+  unkept_promise
+  mismatch
+  deadline_risk
+  churn_signal
+}
+
+enum FlagStatus {
+  open
+  confirmed
+  dismissed
+  resolved
+}
+
+enum Severity {
+  low
+  medium
+  high
+  critical
+}
+
+enum EvidenceStance {
+  supports
+  contradicts
+  context
+}
+
+model Flag {
+  id              String     @id @default(uuid()) @db.Uuid
+  orgId           String     @map("org_id") @db.Uuid
+  accountId       String     @map("account_id") @db.Uuid
+  runId           String?    @map("run_id") @db.Uuid
+  kind            FlagKind
+  title           String
+  explanation     String
+  severity        Severity
+  confidence      Decimal?   @db.Decimal(3, 2)
+  impactCents     BigInt?    @map("impact_cents")
+  status          FlagStatus @default(open)
+  visibleToUserId String?    @map("visible_to_user_id") @db.Uuid
+  resolvedById    String?    @map("resolved_by_id") @db.Uuid
+  resolutionNote  String?    @map("resolution_note")
+  hmemRef         String?    @map("hmem_ref")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+  resolvedAt      DateTime?  @map("resolved_at")
+
+  org             Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account         Account          @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+  run             AgentRun?        @relation(fields: [runId, orgId], references: [id, orgId], onDelete: NoAction)
+  resolvedBy      User?            @relation("FlagResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  visibleTo       User?            @relation("FlagVisibleTo", fields: [visibleToUserId], references: [id], onDelete: Cascade)
+  evidence        FlagEvidence[]
+  proposedActions ProposedAction[]
+
+  @@unique([id, orgId])
+  @@index([orgId, accountId, status])
+  @@index([runId])
+  @@index([resolvedById])
+  @@index([visibleToUserId])
+  @@map("flags")
+}
+
+model FlagEvidence {
+  id              String         @id @default(uuid()) @db.Uuid
+  orgId           String         @map("org_id") @db.Uuid
+  flagId          String         @map("flag_id") @db.Uuid
+  sourceItemId    String?        @map("source_item_id") @db.Uuid
+  extractedItemId String?        @map("extracted_item_id") @db.Uuid
+  stance          EvidenceStance
+  excerpt         String?
+
+  flag          Flag           @relation(fields: [flagId, orgId], references: [id, orgId], onDelete: Cascade)
+  sourceItem    SourceItem?    @relation(fields: [sourceItemId, orgId], references: [id, orgId], onDelete: NoAction)
+  extractedItem ExtractedItem? @relation(fields: [extractedItemId, orgId], references: [id, orgId], onDelete: NoAction)
+
+  @@index([flagId])
+  @@index([sourceItemId])
+  @@index([extractedItemId])
+  @@map("flag_evidence")
+}
+
+enum BriefKind {
+  account
+  meeting_prep
+  handover
+}
+
+model Brief {
+  id              String    @id @default(uuid()) @db.Uuid
+  orgId           String    @map("org_id") @db.Uuid
+  accountId       String    @map("account_id") @db.Uuid
+  runId           String?   @map("run_id") @db.Uuid
+  kind            BriefKind
+  contentMd       String    @map("content_md")
+  visibleToUserId String?   @map("visible_to_user_id") @db.Uuid
+  meetingAt       DateTime? @map("meeting_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  org       Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account   Account         @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+  run       AgentRun?       @relation(fields: [runId, orgId], references: [id, orgId], onDelete: NoAction)
+  visibleTo User?           @relation("BriefVisibleTo", fields: [visibleToUserId], references: [id], onDelete: Cascade)
+  citations BriefCitation[]
+
+  @@unique([id, orgId])
+  @@index([accountId, createdAt(sort: Desc)])
+  @@index([orgId])
+  @@index([runId])
+  @@index([visibleToUserId])
+  @@map("briefs")
+}
+
+model BriefCitation {
+  briefId      String @map("brief_id") @db.Uuid
+  marker       String
+  orgId        String @map("org_id") @db.Uuid
+  sourceItemId String @map("source_item_id") @db.Uuid
+
+  brief      Brief      @relation(fields: [briefId, orgId], references: [id, orgId], onDelete: Cascade)
+  sourceItem SourceItem @relation(fields: [sourceItemId, orgId], references: [id, orgId], onDelete: NoAction)
+
+  @@id([briefId, marker])
+  @@index([sourceItemId])
+  @@map("brief_citations")
+}
+
+enum ActionType {
+  send_email
+  create_ticket
+  update_crm
+  schedule_reminder
+  internal_alert
+}
+
+enum ActionStatus {
+  pending
+  approved
+  rejected
+  executing
+  done
+  failed
+}
+
+model ProposedAction {
+  id               String       @id @default(uuid()) @db.Uuid
+  orgId            String       @map("org_id") @db.Uuid
+  accountId        String?      @map("account_id") @db.Uuid
+  flagId           String?      @map("flag_id") @db.Uuid
+  runId            String?      @map("run_id") @db.Uuid
+  type             ActionType
+  payload          Json
+  rationale        String?
+  requiresApproval Boolean      @default(true) @map("requires_approval")
+  status           ActionStatus @default(pending)
+  idempotencyKey   String       @unique @default(uuid()) @map("idempotency_key") @db.Uuid
+  visibleToUserId  String?      @map("visible_to_user_id") @db.Uuid
+  decidedById      String?      @map("decided_by_id") @db.Uuid
+  decidedAt        DateTime?    @map("decided_at")
+  decisionNote     String?      @map("decision_note")
+  editedPayload    Json?        @map("edited_payload")
+  attempts         Int          @default(0) @db.SmallInt
+  result           Json?
+  lastError        String?      @map("last_error")
+  executedAt       DateTime?    @map("executed_at")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  org       Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account   Account?     @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+  flag      Flag?        @relation(fields: [flagId, orgId], references: [id, orgId], onDelete: NoAction)
+  run       AgentRun?    @relation(fields: [runId, orgId], references: [id, orgId], onDelete: NoAction)
+  decidedBy User?        @relation("ActionDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+  visibleTo User?        @relation("ProposedActionVisibleTo", fields: [visibleToUserId], references: [id], onDelete: Cascade)
+  reminders Reminder[]
+
+  @@unique([id, orgId])
+  @@index([orgId, status, createdAt])
+  @@index([accountId])
+  @@index([flagId])
+  @@index([runId])
+  @@index([decidedById])
+  @@index([visibleToUserId])
+  @@map("proposed_actions")
+}
+
+enum ReminderStatus {
+  scheduled
+  sent
+  failed
+  cancelled
+}
+
+model Reminder {
+  id              String         @id @default(uuid()) @db.Uuid
+  orgId           String         @map("org_id") @db.Uuid
+  accountId       String?        @map("account_id") @db.Uuid
+  userId          String         @map("user_id") @db.Uuid
+  extractedItemId String?        @map("extracted_item_id") @db.Uuid
+  actionId        String?        @map("action_id") @db.Uuid
+  title           String
+  dueAt           DateTime       @map("due_at")
+  bullJobId       String?        @map("bull_job_id")
+  status          ReminderStatus @default(scheduled)
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+
+  org           Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  account       Account?        @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+  user          User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  extractedItem ExtractedItem?  @relation(fields: [extractedItemId, orgId], references: [id, orgId], onDelete: NoAction)
+  action        ProposedAction? @relation(fields: [actionId, orgId], references: [id, orgId], onDelete: NoAction)
+
+  @@index([dueAt, status])
+  @@index([orgId])
+  @@index([accountId])
+  @@index([userId])
+  @@index([extractedItemId])
+  @@index([actionId])
+  @@map("reminders")
+}
+
+enum MessageRole {
+  user
+  assistant
+}
+
+model Conversation {
+  id        String   @id @default(uuid()) @db.Uuid
+  orgId     String   @map("org_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  accountId String?  @map("account_id") @db.Uuid
+  title     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org      Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user     User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account  Account?     @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+  messages Message[]
+
+  @@unique([id, orgId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([orgId])
+  @@index([accountId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String      @id @default(uuid()) @db.Uuid
+  orgId          String      @map("org_id") @db.Uuid
+  conversationId String      @map("conversation_id") @db.Uuid
+  role           MessageRole
+  content        String
+  runId          String?     @map("run_id") @db.Uuid
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  conversation Conversation      @relation(fields: [conversationId, orgId], references: [id, orgId], onDelete: Cascade)
+  run          AgentRun?         @relation(fields: [runId, orgId], references: [id, orgId], onDelete: NoAction)
+  citations    MessageCitation[]
+
+  @@unique([id, orgId])
+  @@index([conversationId, createdAt])
+  @@index([runId])
+  @@map("messages")
+}
+
+model MessageCitation {
+  messageId    String @map("message_id") @db.Uuid
+  marker       String
+  orgId        String @map("org_id") @db.Uuid
+  sourceItemId String @map("source_item_id") @db.Uuid
+
+  message    Message    @relation(fields: [messageId, orgId], references: [id, orgId], onDelete: Cascade)
+  sourceItem SourceItem @relation(fields: [sourceItemId, orgId], references: [id, orgId], onDelete: NoAction)
+
+  @@id([messageId, marker])
+  @@index([sourceItemId])
+  @@map("message_citations")
+}
+
+// World Model (Meterless spec), one namespace per org. State is a fold over
+// wm_events; wm_state holds the side stores the spec keeps outside the log
+// (observations, stories, scores, merge queue). See packages/world-model.
+
+model WorldEvent {
+  orgId         String   @map("org_id") @db.Uuid
+  seq           Int
+  eventId       String   @map("event_id")
+  kind          String
+  payload       Json
+  schemaVersion Int      @map("schema_version") @db.SmallInt
+  // ISO timestamp exactly as the observation supplied it; record timestamps never come from the wall clock.
+  at            String
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@id([orgId, seq])
+  @@map("wm_events")
+}
+
+model WorldAuditEntry {
+  orgId   String  @map("org_id") @db.Uuid
+  seq     Int
+  at      String
+  kind    String
+  actor   String
+  summary String
+  eventId String? @map("event_id")
+  runId   String? @map("run_id")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@id([orgId, seq])
+  @@map("wm_audit")
+}
+
+model WorldState {
+  orgId         String   @id @map("org_id") @db.Uuid
+  side          Json
+  schemaVersion Int      @default(1) @map("schema_version") @db.SmallInt
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("wm_state")
+}

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Navigate } from "react-router";
 import type { MeDto } from "@kept/shared";
 import { useApi } from "../api";
+import { Wordmark } from "../components/Wordmark";
 import { Loading } from "../components/Page";
 import { ui } from "../ui";
 
@@ -29,7 +30,7 @@ export function Home() {
   return (
     <div>
       <nav className={ui.nav}>
-        <span className={ui.brand}>Kept</span>
+        <Wordmark className="text-ink" markClassName="text-brand" />
         <UserButton />
       </nav>
       <section className="mx-auto max-w-[720px] px-4 py-24">

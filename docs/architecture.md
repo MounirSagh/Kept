@@ -17,7 +17,8 @@ Status: proposal, decisions agreed 2026-10-10. Nothing here is implemented yet b
 ## Today
 
 - `apps/api`: Express. Clerk auth, orgs, roles, teams, invitations, accounts and agent-run endpoints. Permission rules in `packages/shared/src/permissions.ts`.
-- `apps/worker`: BullMQ worker. The agent-run processor is a stub (`planner → investigator → critic → advisor` is a TODO).
+- `apps/worker`: BullMQ worker. Sync, matching, extraction, agent runs (`planner → investigator → critic → advisor`), the executor for approved actions, and H-MEM learning.
+- `packages/agents`: the OpenAI model wrapper (structured output, LangSmith tracing), extraction, and the LangGraph agent graph.
 - `apps/web`: React app shell with owner, manager and member views.
 - `packages/db`: Prisma schema. It already reserves `world_model_ref` on accounts, contacts and extracted items, and `hmem_ref` on flags.
 
@@ -63,17 +64,35 @@ None of this changes. Everything below is additive.
 - Disconnecting a source deletes its synced content. A retention policy caps how long raw content is kept.
 - The Integrations page lists the org's sources, each marked "via Zetaris" or "direct".
 
-### 1b. Assigning items to clients
+### 1a. Which sources go where (decided 2026-10-10)
 
-An org's Outlook, Teams, Drive, S3 and Salesforce mix all of its clients together. Kept splits them:
+Zetaris documents connectors for CRMs, file stores and warehouses, not for communication tools, and its REST tables fetch one page per request with no incremental sync. So:
 
-- Signals: sender and recipient email domains, CRM account and contact IDs, Salesforce ownership, folder or bucket conventions in Drive and S3, and names mentioned in the text.
-- The World Model resolves those signals to an `Account` entity using the spec's merge bands: confident matches are assigned, borderline ones go to a review queue in the UI, and the rest stay unassigned.
-- Once assigned, account visibility (owner, team manager, account members) controls who sees the item, through the existing permission rules.
+- **Direct connectors (built, `packages/connectors`, setup in `docs/connectors.md`):** Microsoft 365 (Outlook, calendar, OneDrive, Teams chats), Google Workspace (Gmail, Calendar, Drive), Slack, Linear, Notion, HubSpot. OAuth tokens are encrypted at rest; the worker syncs every 15 minutes, resuming from per-stream cursors stored in `connections.sync_state`.
+- **Through Zetaris (next):** Salesforce, Dynamics 365, S3 / Azure Blob, data warehouses.
+
+### 1b. Routing items to clients (built, deterministic)
+
+An org's tools mix all of its clients together; Kept routes every synced item to **one client account or none**, with explicit rules only (no model decides who can see what). Each item records `match_status` and `match_reason`. Code: `apps/worker/src/matching/`.
+
+1. **Owner mappings:** a Slack channel, Linear team or Notion parent mapped to an account, or marked "not about a client" (Routing page, owners only).
+2. **CRM identity:** HubSpot companies are imported as accounts and contacts as contacts (linked to their company); HubSpot records route to their company.
+3. **Participants:** a known contact's email, else an account's email domain (subdomains included). The org's own domains and free-mail domains are never evidence.
+
+One account → matched. Several → ambiguous (owners review). None → unmatched. Matching runs after each sync with new items, and over every item when accounts or mappings change.
+
+**Who can read a synced item** (`visibleSourceItemsWhere`, which every reader of `source_items` must use): matched items follow their account's visibility; unmatched items from a member's own mailbox stay private to that member; unmatched workspace items are visible to owners only.
+
+Not yet: HubSpot deals and notes (need association lookups), Slack Connect channels routed by the partner's domain, private Slack channels limited to their members.
 
 ### 2. Extraction
 
-- `extract` reads new source items and asks the model (OpenAI, strict JSON-schema output) for commitments, obligations, decisions, deadlines and risks, each with the excerpt it came from. Output goes to `extracted_items` and, as observations, to the World Model.
+- `extract` reads new source items and asks the model (OpenAI, strict JSON-schema output) for commitments, obligations, decisions, deadlines and risks, each with the excerpt it came from. Output goes to `extracted_items` and, as observations, to the World Model. **Built** (`packages/agents/src/extract.ts`, `apps/worker/src/agents/extract.ts`):
+  - Runs after every matching job, on matched items whose `content_hash` differs from `extracted_hash` (new, or changed since last read). CRM records are skipped (structured data, imported by matching).
+  - The account's open items are shown to the model as known refs, so it reports status changes (fulfilled, broken, superseded) instead of duplicates. Broken means the due date passed undelivered; a slip announced earlier stays open and is reported as a risk (enforced in code).
+  - Every result must quote its source: excerpts are checked against the content and anything not found is dropped, as is anything below 0.5 confidence.
+  - Owners resolve from emails and names of org members; commitments default to the account owner.
+  - Each account that got new or changed items gets an agent run queued (one waiting run per account at most).
 
 ### 3. World Model (`packages/world-model`)
 
@@ -93,7 +112,7 @@ Implements the Meterless World Model spec on Postgres, namespaced by `org_id`. *
 
 ### 4. H-MEM (`packages/hmem`)
 
-Implements the Meterless H-MEM spec on Postgres with pgvector, namespaced by `org_id` (and by account where relevant).
+Implements the Meterless H-MEM spec on Postgres with pgvector, namespaced by `org_id` (and by account where relevant). **Built**: passes the Meterless conformance suite (13/13) plus durability tests (`pnpm --filter @kept/hmem test`). `DurableHMEM` persists the engine: changed records only, embeddings in a pgvector column, the trust ledger append-only in `hmem_ledger` (read on demand, not held in memory), sleep backups in `hmem_backups`. OpenAI embeddings are computed before the per-org lock is taken; records the engine creates itself are re-embedded right after. Each record stores its embedding model, and recall only compares records from the current model.
 
 - **Tiers:** short-term, working and long-term memory, plus a trust ledger recording where each memory came from and how it changed.
 - **What Kept remembers:**
@@ -107,7 +126,23 @@ Implements the Meterless H-MEM spec on Postgres with pgvector, namespaced by `or
 
 ### 5. Agent runs
 
-The existing `agent_runs` / `agent_steps` tables stay. Each step assembles context from:
+**Built** as a LangGraph state graph (`packages/agents/src/graph.ts`), run per account by the `agent-runs` worker:
+
+- **Planner** (smart model): reads the account (tracked items, recent activity, open flags, H-MEM lessons) and asks up to five checkable questions, each with keyword searches. No questions ends the run.
+- **Investigator** (fast model): per question, reads the items behind the commitments in question plus Postgres full-text search hits over the account's matched items, and answers with cited excerpts. Citations that aren't in the cited item are dropped.
+- **Critic** (smart model): approves, rejects, or sends findings back with more searches (one extra round by default). Later rounds review only the findings that were re-investigated, and a question whose follow-up searches find nothing new is dropped instead of re-reviewed. Citations carry their item's date and source. Its verdict is stored on the step.
+- **Advisor** (smart model): turns approved findings into flags (with evidence) and proposed actions: an email to the customer, a reminder for the account owner, or an alert for the team.
+- The model never sees database ids, only refs (C1, S2...) mapped back afterwards; flags without checkable evidence are dropped; emails can only go to the account's contacts or domain.
+- Flags carry a `dedupe_key` (account, kind, commitment or topic): a later run never raises the same issue twice, including ones a person dismissed.
+- Every step is an `agent_steps` row with tokens, cost and duration, and adds its cost to the run as it goes; with `LANGSMITH_TRACING=true` the run's LangSmith trace id is the run id.
+- Reasoning models run at `OPENAI_REASONING_EFFORT` (default low); each call times out after 3 minutes.
+- A run that throws goes back to queued for BullMQ's retry. A run found still "running" when its job comes back (the worker died mid-run) is closed as interrupted rather than re-run, so a crash never silently pays for a second full run.
+
+**Approvals and the executor.** Proposed actions wait on the Approvals page, where people edit, approve or reject them. Approved actions run once in the `actions` queue: emails are sent from the approver's own Gmail or Outlook (`gmail.send` / `Mail.Send`, so connections made before need reconnecting), reminders become `reminders` rows plus a delayed email to the account owner, alerts email the account owner. A failed send is recorded, never retried automatically.
+
+**Learning.** Dismissed, resolved and confirmed flags, rejected actions and edited emails become H-MEM memories (the `learn` queue), tagged with their account; the planner recalls them on the next run.
+
+The original design for context, which the built pipeline follows:
 - the World Model: the account's entities, open commitments, relationships and timeline
 - H-MEM: relevant memories
 - Zetaris: full source text, on demand
@@ -133,7 +168,7 @@ Zetaris queries a read replica of Kept's Postgres next to the org's own sources.
 | `packages/world-model` | New. TypeScript implementation of the spec, plus its conformance suite in CI. |
 | `packages/hmem` | New. Same, for H-MEM. |
 | `packages/sources` | New. The `Source` interface, `ZetarisSource` (typed client over Zetaris REST/JDBC) and direct connectors as needed. |
-| `packages/llm` | New. `Generator` and `Embedder` over OpenAI, shared by extraction, agents and both engines. |
+| `packages/llm` | `Embedder` over OpenAI (built) and the deterministic hash embedder for tests; `Generator` comes with extraction. |
 | `packages/db` | Migrations for the `wm_*` and `hmem_*` tables, `connections` changes for Zetaris, the pgvector extension. |
 | `apps/worker` | New queues and jobs: `source-sync`, `extract`, `wm-ingest`, `hmem-mine`, `hmem-consolidate` (nightly); the agent-run processor gets real steps. |
 | `docker-compose.yml` | Switch the Postgres image to one with pgvector (`pgvector/pgvector`). |

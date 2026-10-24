@@ -107,7 +107,7 @@ function Sidebar() {
                       {({ isActive }) => (
                         <>
                           <Icon
-                            className={cx("size-4 shrink-0", isActive ? "text-accent" : "text-ink-faint group-hover:text-ink-muted")}
+                            className={cx("size-4 shrink-0", isActive ? "text-brand" : "text-ink-faint group-hover:text-ink-muted")}
                             strokeWidth={isActive ? 2 : 1.75}
                             aria-hidden
                           />
@@ -154,7 +154,7 @@ function OrgSwitcher() {
 
   const label = (
     <>
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-accent text-[0.8125rem] font-semibold text-on-accent">
+      <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-brand text-[0.8125rem] font-semibold text-on-brand">
         {org.name.charAt(0).toUpperCase()}
       </span>
       <span className="min-w-0 flex-1 text-left">
@@ -191,7 +191,7 @@ function OrgSwitcher() {
                 className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-hover"
               >
                 <span className="min-w-0 flex-1 truncate">{o.name}</span>
-                {o.id === org.id && <Check className="size-4 text-accent" aria-hidden />}
+                {o.id === org.id && <Check className="size-4 text-brand" aria-hidden />}
               </Link>
             </li>
           ))}

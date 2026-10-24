@@ -1,0 +1,41 @@
+import { cn } from "@/lib/utils";
+
+/**
+ * Kept's mark: a trefoil, the simplest true knot. A promise that's tied, so it holds.
+ * Drawn from the trefoil curve with gaps where one strand passes under another.
+ */
+const KNOT =
+  "M13.1 22.0 L12.4 21.1 L11.9 20.1 L11.4 19.1 L11.0 18.0 L10.7 17.0 L10.5 15.9 L10.3 14.8 L10.3 13.8 L10.3 12.8 L10.4 11.8 L10.6 10.8 L10.9 10.0 L11.2 9.1 L11.6 8.4 L12.1 7.7 L12.6 7.1 L13.2 6.7 L13.8 6.3 L14.5 6.0 L15.1 5.8 L15.8 5.7 L16.5 5.7 L17.1 5.8 L17.8 6.1 L18.4 6.4 L19.0 6.8 L19.6 7.4 L20.1 8.0 L20.5 8.7 L20.9 9.5 L21.2 10.3 L21.5 11.2 L21.5 11.4 M20.4 19.5 L19.9 20.5 L19.3 21.5 L18.7 22.4 L18.0 23.2 L17.2 24.0 L16.4 24.8 L15.6 25.4 L14.7 26.0 L13.8 26.5 L12.9 26.9 L12.0 27.2 L11.1 27.4 L10.2 27.5 L9.3 27.5 L8.5 27.4 L7.7 27.3 L7.0 27.0 L6.4 26.7 L5.8 26.3 L5.3 25.8 L4.9 25.3 L4.6 24.7 L4.4 24.0 L4.2 23.3 L4.2 22.6 L4.3 21.9 L4.5 21.1 L4.7 20.4 L5.1 19.7 L5.6 18.9 L6.2 18.2 L6.8 17.6 L7.0 17.5 M14.5 14.4 L15.7 14.3 L16.8 14.3 L17.9 14.4 L19.0 14.6 L20.1 14.9 L21.1 15.2 L22.1 15.6 L23.1 16.1 L23.9 16.6 L24.7 17.2 L25.4 17.8 L26.1 18.5 L26.6 19.2 L27.0 20.0 L27.4 20.7 L27.6 21.4 L27.8 22.2 L27.8 22.9 L27.7 23.6 L27.6 24.3 L27.3 24.9 L26.9 25.5 L26.5 26.0 L26.0 26.5 L25.4 26.8 L24.7 27.1 L24.0 27.4 L23.2 27.5 L22.3 27.5 L21.5 27.5 L20.6 27.3 L19.7 27.1 L19.5 27.0 M13.1 22.0 L13.1 22.0";
+
+/** The knot alone, sized by font size (1em) and colored by currentColor. */
+export function KnotMark({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      className={cn("size-[1em] shrink-0", className)}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d={KNOT} />
+    </svg>
+  );
+}
+
+/**
+ * The Kept logo: the knot and the name, set in Fraunces. Size comes from the caller's font size;
+ * the name takes the text color, the knot takes `markClassName` (brand blue on light backgrounds).
+ */
+export function Wordmark({ className, markClassName }: { className?: string; markClassName?: string }) {
+  return (
+    <span className={cn("inline-flex items-center gap-[0.3em] text-2xl leading-none", className)}>
+      <KnotMark className={cn("size-[1.05em]", markClassName)} />
+      <span className="font-logo font-semibold tracking-[-0.03em]" style={{ fontVariationSettings: '"opsz" 72' }}>
+        Kept
+      </span>
+    </span>
+  );
+}

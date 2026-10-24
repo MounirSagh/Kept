@@ -1,34 +1,67 @@
+import { Mail } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { can, ORG_ROLES, type MemberDto, type MemberTarget, type OrgRole } from "@kept/shared";
+import { useSearchParams } from "react-router";
+import {
+  can, ORG_ROLES, type CreatedInvitationDto, type InvitationDto, type MemberDto, type MemberTarget, type OrgRole,
+} from "@kept/shared";
 import { useApi } from "../../api";
 import { teamName, useOrg } from "../../app/org-context";
 import { ConfirmDialog, Field, FormError, Modal, ModalActions, useSubmit } from "../../components/Modal";
 import { Page } from "../../components/Page";
 import { roleLabel, ui } from "../../ui";
-import { InviteDialog } from "./InviteDialog";
+import { CopyLinkDialog, InviteDialog, InviteImportDialog, InviteResult } from "./InviteDialog";
+import { useTeamInvitations } from "./MyTeam";
 
-type Dialog = { kind: "invite" } | { kind: "edit"; member: MemberDto } | { kind: "remove"; member: MemberDto };
+type Dialog =
+  | { kind: "invite" }
+  | { kind: "import" }
+  | { kind: "edit"; member: MemberDto }
+  | { kind: "remove"; member: MemberDto }
+  | { kind: "resend"; invitation: InvitationDto }
+  | { kind: "link"; invitation: InvitationDto }
+  | { kind: "revoke"; invitation: InvitationDto };
 
+const shortDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+
+/** Everyone in the org, and everyone invited to it: pending invitations are rows with their own actions. */
 export function MembersPage() {
+  const api = useApi();
   const ctx = useOrg();
   const { actor, members, teams } = ctx;
-  const [dialog, setDialog] = useState<Dialog | null>(null);
-  const close = () => setDialog(null);
+  const [params, setParams] = useSearchParams();
+  const canInvite = can(actor, { action: "invitation.list" });
+  // Links like the Overview checklist open the invite modal with ?new=1.
+  const [dialog, setDialog] = useState<Dialog | null>(canInvite && params.has("new") ? { kind: "invite" } : null);
+  const [resent, setResent] = useState<CreatedInvitationDto | null>(null);
+  const { invitations, reload } = useTeamInvitations();
+  const pending = invitations ?? [];
+
+  function close() {
+    setDialog(null);
+    if (params.has("new")) setParams({}, { replace: true });
+  }
 
   async function afterChange(member: MemberDto) {
     if (member.userId === actor.userId) ctx.onSelfChanged();
     await ctx.refresh();
   }
 
+  const people = `${members.length} ${members.length === 1 ? "person" : "people"}`;
+
   return (
     <Page
       title="Members"
-      description={`${members.length} ${members.length === 1 ? "person" : "people"} in ${ctx.org.name}.`}
+      description={`${people} in ${ctx.org.name}${pending.length ? `, ${pending.length} invited` : ""}.`}
       actions={
-        can(actor, { action: "invitation.list" }) && (
-          <button className={ui.button.primary} onClick={() => setDialog({ kind: "invite" })}>
-            Invite people
-          </button>
+        canInvite && (
+          <>
+            <button className={ui.button.ghost} onClick={() => setDialog({ kind: "import" })}>
+              Import CSV
+            </button>
+            <button className={ui.button.primary} onClick={() => setDialog({ kind: "invite" })}>
+              Invite people
+            </button>
+          </>
         )
       }
     >
@@ -39,6 +72,7 @@ export function MembersPage() {
               <th className={ui.th}>Member</th>
               <th className={ui.th}>Role</th>
               <th className={ui.th}>Team</th>
+              <th className={ui.th}>Status</th>
               <th className={ui.th} aria-label="Actions" />
             </tr>
           </thead>
@@ -57,6 +91,7 @@ export function MembersPage() {
                     <span className={ui.badge}>{m.role}</span>
                   </td>
                   <td className={ui.td}>{teamName(teams, m.teamId)}</td>
+                  <td className={`${ui.td} text-ink-muted`}>Joined {shortDate(m.joinedAt)}</td>
                   <td className={ui.tdActions}>
                     {editable && (
                       <button className={ui.button.ghostSm} onClick={() => setDialog({ kind: "edit", member: m })}>
@@ -72,16 +107,91 @@ export function MembersPage() {
                 </tr>
               );
             })}
+            {pending.map((i) => {
+              const manageable = can(actor, { action: "invitation.revoke", target: { role: i.role, teamId: i.teamId } });
+              return (
+                <tr key={i.id}>
+                  <td className={ui.td}>
+                    <div className="flex items-center gap-3">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-dashed border-line-strong text-ink-faint">
+                        <Mail className="size-3.5" aria-hidden />
+                      </span>
+                      <span className="truncate font-medium text-ink-muted">{i.email}</span>
+                    </div>
+                  </td>
+                  <td className={ui.td}>
+                    <span className={ui.badge}>{i.role}</span>
+                  </td>
+                  <td className={ui.td}>{teamName(teams, i.teamId)}</td>
+                  <td className={`${ui.td} whitespace-nowrap`}>
+                    <span className="font-medium text-warn">Invited</span>
+                    <span className="text-ink-muted"> · expires {shortDate(i.expiresAt)}</span>
+                  </td>
+                  <td className={ui.tdActions}>
+                    {manageable && (
+                      <>
+                        <button className={ui.button.ghostSm} onClick={() => setDialog({ kind: "resend", invitation: i })}>
+                          Resend
+                        </button>
+                        <button className={ui.button.ghostSm} onClick={() => setDialog({ kind: "link", invitation: i })}>
+                          Copy link
+                        </button>
+                        <button className={ui.button.ghostSm} onClick={() => setDialog({ kind: "revoke", invitation: i })}>
+                          Revoke
+                        </button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
 
-      {dialog?.kind === "invite" && <InviteDialog onClose={close} />}
+      {dialog?.kind === "invite" && <InviteDialog onClose={close} onInvited={() => void reload()} />}
+      {dialog?.kind === "import" && (
+        <InviteImportDialog
+          onClose={() => {
+            close();
+            void reload();
+          }}
+        />
+      )}
       {dialog?.kind === "edit" && (
         <EditMemberDialog member={dialog.member} onClose={close} onSaved={() => afterChange(dialog.member)} />
       )}
       {dialog?.kind === "remove" && (
         <RemoveMemberDialog member={dialog.member} onClose={close} onRemoved={() => afterChange(dialog.member)} />
+      )}
+      {dialog?.kind === "resend" && (
+        <ConfirmDialog
+          title={`Resend invitation to ${dialog.invitation.email}?`}
+          confirmLabel="Resend"
+          onClose={close}
+          onConfirm={async () => {
+            setResent(await api.resendInvitation(ctx.orgId, dialog.invitation.id));
+            await reload();
+          }}
+        >
+          We'll email a new link and restart the 7-day expiry. The previous link stops working.
+        </ConfirmDialog>
+      )}
+      {resent && <InviteResult invitation={resent} onClose={() => setResent(null)} />}
+      {dialog?.kind === "link" && <CopyLinkDialog invitation={dialog.invitation} onClose={close} onIssued={() => void reload()} />}
+      {dialog?.kind === "revoke" && (
+        <ConfirmDialog
+          title={`Revoke invitation for ${dialog.invitation.email}?`}
+          confirmLabel="Revoke"
+          tone="danger"
+          onClose={close}
+          onConfirm={async () => {
+            await api.revokeInvitation(ctx.orgId, dialog.invitation.id);
+            await reload();
+          }}
+        >
+          The link stops working immediately. You can invite them again later.
+        </ConfirmDialog>
       )}
     </Page>
   );

@@ -22,6 +22,31 @@ export async function create(req: Request, res: Response) {
   res.status(201).json(await invitations.createInvitation(currentActor(req), email, target));
 }
 
+export async function resend(req: Request, res: Response) {
+  const { invitationId } = parse(invitationParams, req.params);
+  res.json(await invitations.resendInvitation(currentActor(req), invitationId));
+}
+
+export async function link(req: Request, res: Response) {
+  const { invitationId } = parse(invitationParams, req.params);
+  res.json(await invitations.resendInvitation(currentActor(req), invitationId, { email: false }));
+}
+
+const importBody = z.object({
+  rows: z.array(
+    z.object({
+      row: z.number().int().positive(),
+      email: z.email().trim().toLowerCase(),
+      role: z.enum(ORG_ROLES),
+      team: z.string().trim().max(100).nullable(),
+    }),
+  ),
+});
+
+export async function importRows(req: Request, res: Response) {
+  res.json(await invitations.importInvitations(currentActor(req), parse(importBody, req.body).rows));
+}
+
 export async function revoke(req: Request, res: Response) {
   const { invitationId } = parse(invitationParams, req.params);
   await invitations.revokeInvitation(currentActor(req), invitationId);

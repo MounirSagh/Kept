@@ -27,3 +27,9 @@ export async function remove(req: Request, res: Response) {
   await teams.deleteTeam(currentActor(req).orgId, teamId);
   res.status(204).end();
 }
+
+const importBody = z.object({ rows: z.array(z.object({ row: z.number().int().positive(), name: z.string().trim().min(1).max(100) })) });
+
+export async function importRows(req: Request, res: Response) {
+  res.json(await teams.importTeams(currentActor(req).orgId, parse(importBody, req.body).rows));
+}

@@ -1,16 +1,22 @@
 import { UsersRound } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router";
-import { can, type InvitationDto, type MemberDto } from "@kept/shared";
+import { can, type CreatedInvitationDto, type InvitationDto, type MemberDto } from "@kept/shared";
 import { useApi } from "../../api";
 import { teamName, useOrg } from "../../app/org-context";
 import { ConfirmDialog } from "../../components/Modal";
 import { EmptyState, Page, Section } from "../../components/Page";
 import { ui } from "../../ui";
-import { InviteDialog } from "./InviteDialog";
+import { CopyLinkDialog, InviteDialog, InviteImportDialog, InviteResult } from "./InviteDialog";
 import { MemberIdentity, RemoveMemberDialog } from "./Members";
 
-type Dialog = { kind: "invite" } | { kind: "remove"; member: MemberDto } | { kind: "revoke"; invitation: InvitationDto };
+type Dialog =
+  | { kind: "invite" }
+  | { kind: "import" }
+  | { kind: "link"; invitation: InvitationDto }
+  | { kind: "remove"; member: MemberDto }
+  | { kind: "resend"; invitation: InvitationDto }
+  | { kind: "revoke"; invitation: InvitationDto };
 
 /**
  * Pending invitations into the actor's team (the API scopes a manager's list to their team).
@@ -43,6 +49,7 @@ export function MyTeamPage() {
   const [params, setParams] = useSearchParams();
   const [dialog, setDialog] = useState<Dialog | null>(isManager && params.has("new") ? { kind: "invite" } : null);
   const self = members.find((m) => m.userId === actor.userId);
+  const [resent, setResent] = useState<CreatedInvitationDto | null>(null);
   const { invitations, reload } = useTeamInvitations();
 
   function close() {
@@ -94,9 +101,14 @@ export function MyTeamPage() {
       }
       actions={
         isManager && (
-          <button className={ui.button.primary} onClick={() => setDialog({ kind: "invite" })}>
-            Invite to {name}
-          </button>
+          <>
+            <button className={ui.button.ghost} onClick={() => setDialog({ kind: "import" })}>
+              Import CSV
+            </button>
+            <button className={ui.button.primary} onClick={() => setDialog({ kind: "invite" })}>
+              Invite to {name}
+            </button>
+          </>
         )
       }
     >
@@ -159,6 +171,12 @@ export function MyTeamPage() {
                       Expires {new Date(i.expiresAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                     </td>
                     <td className={ui.tdActions}>
+                      <button className={ui.button.ghostSm} onClick={() => setDialog({ kind: "resend", invitation: i })}>
+                        Resend
+                      </button>
+                      <button className={ui.button.ghostSm} onClick={() => setDialog({ kind: "link", invitation: i })}>
+                        Copy link
+                      </button>
                       <button className={ui.button.ghostSm} onClick={() => setDialog({ kind: "revoke", invitation: i })}>
                         Revoke
                       </button>
@@ -174,7 +192,30 @@ export function MyTeamPage() {
       {leave}
 
       {dialog?.kind === "invite" && <InviteDialog onClose={close} onInvited={() => void reload()} />}
+      {dialog?.kind === "import" && (
+        <InviteImportDialog
+          onClose={() => {
+            close();
+            void reload();
+          }}
+        />
+      )}
+      {dialog?.kind === "link" && <CopyLinkDialog invitation={dialog.invitation} onClose={close} onIssued={() => void reload()} />}
       {removeDialog}
+      {dialog?.kind === "resend" && (
+        <ConfirmDialog
+          title={`Resend invitation to ${dialog.invitation.email}?`}
+          confirmLabel="Resend"
+          onClose={close}
+          onConfirm={async () => {
+            setResent(await api.resendInvitation(ctx.orgId, dialog.invitation.id));
+            await reload();
+          }}
+        >
+          We'll email a new link and restart the 7-day expiry. The previous link stops working.
+        </ConfirmDialog>
+      )}
+      {resent && <InviteResult invitation={resent} onClose={() => setResent(null)} />}
       {dialog?.kind === "revoke" && (
         <ConfirmDialog
           title={`Revoke invitation for ${dialog.invitation.email}?`}

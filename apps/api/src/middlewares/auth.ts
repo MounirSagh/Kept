@@ -8,11 +8,20 @@ import { prisma } from "../lib/prisma.js";
 import type { OrgActor } from "../types/express.js";
 import { findOrSyncUser } from "../services/users.service.js";
 
+/**
+ * Origins whose sign-in tokens the API accepts. In development WEB_ORIGIN is often a tunnel (OAuth
+ * providers like Slack need HTTPS), while the app is also opened at localhost: both must work.
+ */
+const authorizedParties = [
+  env.WEB_ORIGIN,
+  ...(env.NODE_ENV === "development" && env.WEB_PORT ? [`http://localhost:${env.WEB_PORT}`] : []),
+];
+
 export const authenticate = clerkMiddleware({
   clerkClient: clerk,
   secretKey: env.CLERK_SECRET_KEY,
   publishableKey: env.CLERK_PUBLISHABLE_KEY,
-  authorizedParties: [env.WEB_ORIGIN],
+  authorizedParties,
 });
 
 export async function requireUser(req: Request, res: Response, next: NextFunction) {

@@ -10,11 +10,14 @@ export function Modal({
   description,
   onClose,
   children,
+  wide = false,
 }: {
   title: string;
   description?: ReactNode;
   onClose: () => void;
   children: ReactNode;
+  /** For content that needs room, like an import preview table. */
+  wide?: boolean;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -34,7 +37,7 @@ export function Modal({
       }}
       // A click on the dialog element itself (not its content) is a click on the backdrop.
       onClick={(e) => e.target === ref.current && onClose()}
-      className="m-auto w-[calc(100%-2rem)] max-w-md rounded-xl border border-line bg-canvas p-0 text-ink shadow-2xl backdrop:bg-ink/25"
+      className={`m-auto w-[calc(100%-2rem)] ${wide ? "max-w-2xl" : "max-w-md"} rounded-xl border border-line bg-canvas p-0 text-ink shadow-2xl backdrop:bg-ink/25`}
     >
       <div className="p-6">
         <h2 id={titleId} className="text-base font-semibold">

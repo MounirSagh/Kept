@@ -20,8 +20,14 @@ export interface MemberTarget {
   teamId: string | null;
 }
 
+/** personal: one member's own account (mailbox, calendar). org: a workspace connected for everyone. */
+export type ConnectionScope = "personal" | "org";
+
 export type Permission =
   | { action: "org.manage" }
+  | { action: "account.manage" }
+  | { action: "connection.create"; scope: ConnectionScope }
+  | { action: "connection.manage"; scope: ConnectionScope; ownerUserId: string | null }
   | { action: "team.manage" }
   | { action: "invitation.create"; target: MemberTarget }
   | { action: "invitation.list" }
@@ -47,6 +53,7 @@ export function can(actor: Actor, permission: Permission): boolean {
   switch (permission.action) {
     case "org.manage":
     case "team.manage":
+    case "account.manage":
       return isSuperuser(actor);
     case "invitation.list":
       return isSuperuser(actor) || actor.role === "manager";
@@ -55,6 +62,12 @@ export function can(actor: Actor, permission: Permission): boolean {
       return isSuperuser(actor) || managesTarget(actor, permission.target);
     case "member.update":
       return isSuperuser(actor);
+    case "connection.create":
+      // Anyone in the org can connect their own account; workspaces are connected by owners.
+      return permission.scope === "personal" ? actor.role !== null || actor.isPlatformAdmin : isSuperuser(actor);
+    case "connection.manage":
+      // Sync now / disconnect: owners for anything, members for their own personal connections.
+      return isSuperuser(actor) || (permission.scope === "personal" && permission.ownerUserId === actor.userId);
     case "member.remove":
       if (permission.target.userId === actor.userId) return true;
       return isSuperuser(actor) || managesTarget(actor, permission.target);

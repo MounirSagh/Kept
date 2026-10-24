@@ -3,9 +3,25 @@ import { z } from "zod";
 import { Prisma } from "@kept/db";
 import { parse } from "../lib/validate.js";
 import { currentActor, currentUser } from "../middlewares/auth.js";
-import { createOrganization, renameOrganization } from "../services/orgs.service.js";
+import { createOrganization, getOrganization, updateOrganization } from "../services/orgs.service.js";
 
-const renameBody = z.object({ name: z.string().trim().min(1).max(100) });
+// Blank inputs become absent, so the stored profile only holds what was filled in.
+const text = (max: number) => z.string().trim().max(max).optional().transform((v) => v || undefined);
+const profileSchema = z.object({
+  legalName: text(200),
+  website: text(300),
+  industry: text(100),
+  description: text(2000),
+  email: z.union([z.literal(""), z.email().trim()]).optional().transform((v) => v || undefined),
+  phone: text(50),
+  address: z
+    .object({ line1: text(200), line2: text(200), city: text(100), region: text(100), postalCode: text(20), country: text(100) })
+    .optional(),
+  timezone: text(64).refine((tz) => !tz || Intl.supportedValuesOf("timeZone").includes(tz), "Unknown time zone"),
+  currency: z.string().trim().toUpperCase().regex(/^([A-Z]{3})?$/, "Use a 3-letter currency code").optional().transform((v) => v || undefined),
+  emailSignature: text(2000),
+});
+const updateBody = z.object({ name: z.string().trim().min(1).max(100).optional(), profile: profileSchema.optional() });
 
 const createBody = z.object({
   name: z.string().trim().min(1).max(100),
@@ -35,7 +51,10 @@ export async function create(req: Request, res: Response) {
   }
 }
 
-export async function rename(req: Request, res: Response) {
-  const { name } = parse(renameBody, req.body);
-  res.json(await renameOrganization(currentActor(req).orgId, name));
+export async function get(req: Request, res: Response) {
+  res.json(await getOrganization(currentActor(req).orgId));
+}
+
+export async function update(req: Request, res: Response) {
+  res.json(await updateOrganization(currentActor(req).orgId, parse(updateBody, req.body)));
 }

@@ -1,0 +1,41 @@
+{
+  "name": "@kept/hmem",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "development": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./durable": {
+      "development": "./src/durable.ts",
+      "types": "./dist/durable.d.ts",
+      "default": "./dist/durable.js"
+    },
+    "./prisma": {
+      "development": "./src/prisma-storage.ts",
+      "types": "./dist/prisma-storage.d.ts",
+      "default": "./dist/prisma-storage.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "conformance": "HMEM_IMPL=src/index.ts tsx --conditions=development conformance/runner.ts",
+    "test": "pnpm conformance && vitest run"
+  },
+  "dependencies": {
+    "@kept/db": "workspace:*",
+    "@kept/llm": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.3"
+  }
+}

@@ -1,14 +1,15 @@
 import { UsersRound } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router";
-import { can, type TeamDto } from "@kept/shared";
+import { can, toTeamRows, type TeamDto } from "@kept/shared";
 import { useApi } from "../../api";
 import { useOrg } from "../../app/org-context";
+import { ImportDialog } from "../../components/ImportDialog";
 import { ConfirmDialog, Field, FormError, Modal, ModalActions, useSubmit } from "../../components/Modal";
 import { EmptyState, Page } from "../../components/Page";
 import { ui } from "../../ui";
 
-type Dialog = { kind: "create" } | { kind: "rename"; team: TeamDto } | { kind: "delete"; team: TeamDto };
+type Dialog = { kind: "create" } | { kind: "import" } | { kind: "rename"; team: TeamDto } | { kind: "delete"; team: TeamDto };
 
 export function TeamsPage() {
   const api = useApi();
@@ -31,9 +32,14 @@ export function TeamsPage() {
       .join(", ") || "—";
 
   const newTeam = (
-    <button className={ui.button.primary} onClick={() => setDialog({ kind: "create" })}>
-      New team
-    </button>
+    <div className="flex gap-2">
+      <button className={ui.button.ghost} onClick={() => setDialog({ kind: "import" })}>
+        Import CSV
+      </button>
+      <button className={ui.button.primary} onClick={() => setDialog({ kind: "create" })}>
+        New team
+      </button>
+    </div>
   );
 
   return (
@@ -81,6 +87,21 @@ export function TeamsPage() {
       )}
 
       {dialog?.kind === "create" && <TeamDialog onClose={close} />}
+      {dialog?.kind === "import" && (
+        <ImportDialog
+          title="Import teams"
+          description="One team name per row. Teams that already exist are left as they are. Add people to teams afterwards by inviting them with a team, or from the Members page."
+          template={"Team\nEnterprise\nMid-market\n"}
+          templateName="kept-teams.csv"
+          convert={toTeamRows}
+          columns={[{ label: "Team", render: (r) => r.name }]}
+          onImport={(rows) => api.importTeams(ctx.orgId, rows)}
+          onClose={() => {
+            close();
+            void ctx.refresh();
+          }}
+        />
+      )}
       {dialog?.kind === "rename" && <TeamDialog team={dialog.team} onClose={close} />}
       {dialog?.kind === "delete" && (
         <ConfirmDialog

@@ -5,3 +5,7 @@ dist
 .env
 .DS_Store
 packages/db/src/generated
+
+# HubSpot CLI credentials (hs init)
+hubspot.config.yml
+.hsaccount

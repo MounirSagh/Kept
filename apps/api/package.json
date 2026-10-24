@@ -15,6 +15,7 @@
   "dependencies": {
     "@clerk/backend": "^3.23.2",
     "@clerk/express": "^2.1.78",
+    "@kept/connectors": "workspace:*",
     "@kept/db": "workspace:*",
     "@kept/shared": "workspace:*",
     "bullmq": "^6.3.12",

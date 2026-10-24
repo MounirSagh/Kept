@@ -24,10 +24,10 @@ enum InvitationStatus {
 }
 
 model User {
-  id          String   @id @default(uuid()) @db.Uuid
-  clerkUserId String   @unique @map("clerk_user_id")
-  email       String   @unique
-  fullName    String?  @map("full_name")
+  id              String   @id @default(uuid()) @db.Uuid
+  clerkUserId     String   @unique @map("clerk_user_id")
+  email           String   @unique
+  fullName        String?  @map("full_name")
   avatarUrl       String?  @map("avatar_url")
   preferences     Json     @default("{}")
   isPlatformAdmin Boolean  @default(false) @map("is_platform_admin")
@@ -41,6 +41,7 @@ model User {
   ownedAccounts         Account[]        @relation("AccountOwner")
   accountMemberships    AccountMember[]
   ownedItems            ExtractedItem[]  @relation("ItemOwner")
+  createdItems          ExtractedItem[]  @relation("ItemCreator")
   requestedRuns         AgentRun[]       @relation("RunRequester")
   resolvedFlags         Flag[]           @relation("FlagResolver")
   decidedActions        ProposedAction[] @relation("ActionDecider")
@@ -78,9 +79,14 @@ model Organization {
   proposedActions ProposedAction[]
   reminders       Reminder[]
   conversations   Conversation[]
+  sourceMappings  SourceMapping[]
   worldEvents     WorldEvent[]
   worldAudit      WorldAuditEntry[]
   worldState      WorldState?
+  memories        Memory[]
+  memoryLedger    MemoryLedgerEntry[]
+  memoryState     MemoryState?
+  memoryBackups   MemoryBackup[]
 
   @@map("organizations")
 }
@@ -145,15 +151,16 @@ model Invitation {
   @@map("invitations")
 }
 
+// One value per provider account: a Microsoft connection covers Outlook, Teams and OneDrive.
 enum Provider {
-  gmail
-  outlook
+  microsoft
+  google
   slack
-  teams
+  linear
+  notion
   hubspot
-  gdrive
   zendesk
-  calendar
+  salesforce
 }
 
 enum ConnectionStatus {
@@ -175,17 +182,24 @@ model Connection {
   tokenKeyVersion   Int?             @map("token_key_version") @db.SmallInt
   tokenExpiresAt    DateTime?        @map("token_expires_at")
   scopes            String[]
+  // Display name of the connected account: an email address or a workspace name.
+  label             String?
   status            ConnectionStatus @default(active)
-  syncCursor        String?          @map("sync_cursor")
+  // Per-stream cursors, owned by the provider's connector (packages/connectors).
+  syncState         Json             @default("{}") @map("sync_state")
   lastSyncedAt      DateTime?        @map("last_synced_at")
+  // Claimed by the worker while a sync runs, so two syncs of one connection never overlap.
+  syncStartedAt     DateTime?        @map("sync_started_at")
+  lastError         String?          @map("last_error")
   createdAt         DateTime         @default(now()) @map("created_at")
   updatedAt         DateTime         @updatedAt @map("updated_at")
 
-  org           Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  owner         User?          @relation("PersonalConnection", fields: [ownerUserId], references: [id], onDelete: Cascade)
-  connectedBy   User?          @relation("ConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
-  webhookEvents WebhookEvent[]
-  sourceItems   SourceItem[]
+  org            Organization    @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  owner          User?           @relation("PersonalConnection", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  connectedBy    User?           @relation("ConnectedBy", fields: [connectedById], references: [id], onDelete: SetNull)
+  webhookEvents  WebhookEvent[]
+  sourceItems    SourceItem[]
+  sourceMappings SourceMapping[]
 
   @@unique([id, orgId])
   @@unique([orgId, provider, externalAccountId])
@@ -221,9 +235,24 @@ model Account {
   domain           String?
   crmExternalId    String?   @map("crm_external_id")
   ownerUserId      String?   @map("owner_user_id") @db.Uuid
+  // What the client pays us a year, and when the contract renews (Kept's own fields, never synced).
   annualValueCents BigInt?   @map("annual_value_cents")
   currency         String?   @db.Char(3)
   renewalDate      DateTime? @map("renewal_date") @db.Date
+  // Company profile; kept in sync from the CRM for imported accounts.
+  industry           String?
+  companyType        String?   @map("company_type")
+  description        String?
+  employeeCount      Int?      @map("employee_count")
+  /** The client's own yearly revenue, in the account's currency. */
+  annualRevenueCents BigInt?   @map("annual_revenue_cents")
+  city               String?
+  region             String?
+  postalCode         String?   @map("postal_code")
+  country            String?
+  /** IANA time zone, e.g. "America/Toronto". */
+  timezone           String?
+  linkedinUrl        String?   @map("linkedin_url")
   healthScore      Int?      @map("health_score") @db.SmallInt
   worldModelRef    String?   @map("world_model_ref")
   createdAt        DateTime  @default(now()) @map("created_at")
@@ -242,8 +271,11 @@ model Account {
   proposedActions ProposedAction[]
   reminders       Reminder[]
   conversations   Conversation[]
+  sourceMappings  SourceMapping[]
 
   @@unique([id, orgId])
+  // e.g. "hubspot:123"; lets CRM imports upsert instead of duplicating.
+  @@unique([orgId, crmExternalId])
   @@index([orgId, domain])
   @@index([orgId, renewalDate])
   @@index([ownerUserId])
@@ -270,6 +302,8 @@ model Contact {
   fullName      String?   @map("full_name")
   email         String?
   title         String?
+  phone         String?
+  crmExternalId String?   @map("crm_external_id")
   isActive      Boolean   @default(true) @map("is_active")
   worldModelRef String?   @map("world_model_ref")
   createdAt     DateTime  @default(now()) @map("created_at")
@@ -279,6 +313,8 @@ model Contact {
   org     Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
   account Account?     @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
 
+  // Email is also unique among non-deleted contacts (partial index contacts_org_id_email_active_key, in SQL only).
+  @@unique([orgId, crmExternalId])
   @@index([orgId, email])
   @@index([accountId])
   @@map("contacts")
@@ -293,25 +329,34 @@ enum SourceKind {
   invoice
   transcript
   event
+  crm_record
 }
 
 model SourceItem {
-  id              String     @id @default(uuid()) @db.Uuid
-  orgId           String     @map("org_id") @db.Uuid
-  connectionId    String     @map("connection_id") @db.Uuid
-  accountId       String?    @map("account_id") @db.Uuid
+  id              String      @id @default(uuid()) @db.Uuid
+  orgId           String      @map("org_id") @db.Uuid
+  connectionId    String      @map("connection_id") @db.Uuid
+  accountId       String?     @map("account_id") @db.Uuid
   kind            SourceKind
-  externalId      String     @map("external_id")
+  externalId      String      @map("external_id")
   url             String?
   title           String?
   author          String?
-  occurredAt      DateTime   @map("occurred_at")
-  contentText     String?    @map("content_text")
-  contentHash     String     @map("content_hash")
-  visibleToUserId String?    @map("visible_to_user_id") @db.Uuid
-  metadata        Json       @default("{}")
-  ingestedAt      DateTime   @default(now()) @map("ingested_at")
-  deletedAt       DateTime?  @map("deleted_at")
+  occurredAt      DateTime    @map("occurred_at")
+  contentText     String?     @map("content_text")
+  contentHash     String      @map("content_hash")
+  visibleToUserId String?     @map("visible_to_user_id") @db.Uuid
+  metadata        Json        @default("{}")
+  // Where the item lives in its tool (Slack channel, Linear team, Notion parent); owners map containers to accounts.
+  containerId     String?     @map("container_id")
+  containerLabel  String?     @map("container_label")
+  matchStatus     MatchStatus @default(pending) @map("match_status")
+  // Why the item has its account (or none), for audit: "contact lina@northwind.com", "channel mapping"...
+  matchReason     String?     @map("match_reason")
+  ingestedAt      DateTime    @default(now()) @map("ingested_at")
+  // content_hash of the version commitments were last extracted from; differs from content_hash when there's new content to read.
+  extractedHash   String?     @map("extracted_hash")
+  deletedAt       DateTime?   @map("deleted_at")
 
   org              Organization      @relation(fields: [orgId], references: [id], onDelete: Cascade)
   connection       Connection        @relation(fields: [connectionId, orgId], references: [id, orgId], onDelete: Cascade)
@@ -325,9 +370,43 @@ model SourceItem {
   @@unique([id, orgId])
   @@unique([connectionId, externalId])
   @@index([accountId, occurredAt(sort: Desc)])
-  @@index([orgId])
+  @@index([orgId, matchStatus])
+  @@index([connectionId, containerId])
+  @@index([accountId, extractedHash])
   @@index([visibleToUserId])
   @@map("source_items")
+}
+
+/// pending: not evaluated yet. matched: has an account. unmatched: no rule applied.
+/// ambiguous: rules pointed at several accounts. ignored: its container is marked as not client-related.
+enum MatchStatus {
+  pending
+  matched
+  unmatched
+  ambiguous
+  ignored
+}
+
+/// An owner's decision about a container: it belongs to one account, or it is ignored.
+model SourceMapping {
+  id             String   @id @default(uuid()) @db.Uuid
+  orgId          String   @map("org_id") @db.Uuid
+  connectionId   String   @map("connection_id") @db.Uuid
+  containerId    String   @map("container_id")
+  containerLabel String?  @map("container_label")
+  accountId      String?  @map("account_id") @db.Uuid
+  ignored        Boolean  @default(false)
+  createdById    String?  @map("created_by_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  org        Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  connection Connection   @relation(fields: [connectionId, orgId], references: [id, orgId], onDelete: Cascade)
+  account    Account?     @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
+
+  @@unique([connectionId, containerId])
+  @@index([orgId])
+  @@map("source_mappings")
 }
 
 enum ItemType {
@@ -337,6 +416,13 @@ enum ItemType {
   deadline
   preference
   risk
+}
+
+/// Where a commitment came from: read out of a synced item, typed by a person, or imported from a file.
+enum ItemOrigin {
+  extracted
+  manual
+  import
 }
 
 enum ItemStatus {
@@ -359,8 +445,11 @@ model ExtractedItem {
   dueDate         DateTime?  @map("due_date") @db.Date
   status          ItemStatus @default(open)
   confidence      Decimal?   @db.Decimal(3, 2)
-  sourceItemId    String     @map("source_item_id") @db.Uuid
+  // Null for commitments added by hand or imported from a file.
+  sourceItemId    String?    @map("source_item_id") @db.Uuid
   sourceExcerpt   String?    @map("source_excerpt")
+  origin          ItemOrigin @default(extracted)
+  createdById     String?    @map("created_by_id") @db.Uuid
   visibleToUserId String?    @map("visible_to_user_id") @db.Uuid
   worldModelRef   String?    @map("world_model_ref")
   createdAt       DateTime   @default(now()) @map("created_at")
@@ -370,9 +459,11 @@ model ExtractedItem {
   org          Organization   @relation(fields: [orgId], references: [id], onDelete: Cascade)
   account      Account?       @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
   owner        User?          @relation("ItemOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
-  sourceItem   SourceItem     @relation(fields: [sourceItemId, orgId], references: [id, orgId], onDelete: NoAction)
+  sourceItem   SourceItem?    @relation(fields: [sourceItemId, orgId], references: [id, orgId], onDelete: NoAction)
   visibleTo    User?          @relation("ExtractedItemVisibleTo", fields: [visibleToUserId], references: [id], onDelete: Cascade)
+  createdBy    User?          @relation("ItemCreator", fields: [createdById], references: [id], onDelete: SetNull)
   flagEvidence FlagEvidence[]
+  flags        Flag[]         @relation("FlagCommitment")
   reminders    Reminder[]
 
   @@unique([id, orgId])
@@ -507,6 +598,8 @@ model Flag {
   orgId           String     @map("org_id") @db.Uuid
   accountId       String     @map("account_id") @db.Uuid
   runId           String?    @map("run_id") @db.Uuid
+  // The commitment the flag is about, if it's about one (churn signals usually aren't).
+  extractedItemId String?    @map("extracted_item_id") @db.Uuid
   kind            FlagKind
   title           String
   explanation     String
@@ -518,6 +611,8 @@ model Flag {
   resolvedById    String?    @map("resolved_by_id") @db.Uuid
   resolutionNote  String?    @map("resolution_note")
   hmemRef         String?    @map("hmem_ref")
+  // What the flag is about (kind plus commitment or topic), so later runs don't raise the same issue again.
+  dedupeKey       String?    @map("dedupe_key")
   createdAt       DateTime   @default(now()) @map("created_at")
   updatedAt       DateTime   @updatedAt @map("updated_at")
   resolvedAt      DateTime?  @map("resolved_at")
@@ -525,14 +620,17 @@ model Flag {
   org             Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
   account         Account          @relation(fields: [accountId, orgId], references: [id, orgId], onDelete: NoAction)
   run             AgentRun?        @relation(fields: [runId, orgId], references: [id, orgId], onDelete: NoAction)
+  extractedItem   ExtractedItem?   @relation("FlagCommitment", fields: [extractedItemId, orgId], references: [id, orgId], onDelete: NoAction)
   resolvedBy      User?            @relation("FlagResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
   visibleTo       User?            @relation("FlagVisibleTo", fields: [visibleToUserId], references: [id], onDelete: Cascade)
   evidence        FlagEvidence[]
   proposedActions ProposedAction[]
 
   @@unique([id, orgId])
+  @@unique([orgId, dedupeKey])
   @@index([orgId, accountId, status])
   @@index([runId])
+  @@index([extractedItemId])
   @@index([resolvedById])
   @@index([visibleToUserId])
   @@map("flags")
@@ -802,4 +900,65 @@ model WorldState {
   org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
 
   @@map("wm_state")
+}
+
+// H-MEM (Meterless spec), one namespace per org. Memory records are mutable;
+// hmem_ledger is the append-only trust ledger of every change. See packages/hmem.
+
+model Memory {
+  orgId          String                 @map("org_id") @db.Uuid
+  id             String
+  // The full record except its embedding, which lives in the vector column.
+  record         Json
+  embedding      Unsupported("vector")?
+  embeddingModel String?                @map("embedding_model")
+  updatedAt      DateTime               @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@id([orgId, id])
+  @@map("hmem_memories")
+}
+
+model MemoryLedgerEntry {
+  orgId         String @map("org_id") @db.Uuid
+  seq           Int
+  memoryId      String @map("memory_id")
+  action        String
+  actor         String
+  // Engine clock (epoch ms), not the database clock.
+  timestamp     BigInt
+  previousState Json?  @map("previous_state")
+  newState      Json?  @map("new_state")
+  details       Json?
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@id([orgId, seq])
+  @@index([orgId, memoryId])
+  @@map("hmem_ledger")
+}
+
+model MemoryState {
+  orgId     String   @id @map("org_id") @db.Uuid
+  // Bumped on every write so other processes know to reload.
+  version   Int
+  side      Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("hmem_state")
+}
+
+model MemoryBackup {
+  orgId     String   @map("org_id") @db.Uuid
+  id        String
+  snapshot  Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@id([orgId, id])
+  @@map("hmem_backups")
 }

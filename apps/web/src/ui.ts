@@ -12,13 +12,12 @@ const fieldBase =
 export const ui = {
   page: "mx-auto max-w-[1080px] px-4",
   nav: "mx-auto flex max-w-[1080px] items-center justify-between px-4 py-5",
-  brand: "text-lg font-semibold tracking-tight",
 
   button: {
-    primary: cx(buttonBase, "border-transparent bg-accent px-3.5 py-2 text-sm text-on-accent hover:bg-accent-hover"),
+    primary: cx(buttonBase, "border-transparent bg-brand px-3.5 py-2 text-sm text-on-brand hover:bg-brand-hover"),
     ghost: cx(buttonBase, "border-line-strong bg-canvas px-3.5 py-2 text-sm text-ink hover:bg-hover"),
-    primarySm: cx(buttonBase, "border-transparent bg-accent px-2.5 py-1 text-[0.8125rem] text-on-accent hover:bg-accent-hover"),
-    danger: cx(buttonBase, "border-transparent bg-danger px-3.5 py-2 text-sm text-on-accent hover:opacity-90"),
+    primarySm: cx(buttonBase, "border-transparent bg-brand px-2.5 py-1 text-[0.8125rem] text-on-brand hover:bg-brand-hover"),
+    danger: cx(buttonBase, "border-transparent bg-danger px-3.5 py-2 text-sm text-on-brand hover:opacity-90"),
     ghostSm: cx(buttonBase, "border-line-strong bg-canvas px-2.5 py-1 text-[0.8125rem] text-ink hover:bg-hover"),
   },
 

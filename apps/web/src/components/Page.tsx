@@ -1,4 +1,4 @@
-import type { LucideIcon } from "lucide-react";
+import { ArrowLeft, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { ui } from "../ui";
@@ -7,15 +7,24 @@ export function Page({
   title,
   description,
   actions,
+  back,
   children,
 }: {
   title: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
+  /** A link back to the parent page, shown above the title. */
+  back?: { to: string; label: string };
   children: ReactNode;
 }) {
   return (
     <div className="mx-auto w-full max-w-[1040px] px-5 pt-8 pb-16 lg:px-10 lg:pt-10">
+      {back && (
+        <Link to={back.to} relative="path" className="mb-3 inline-flex items-center gap-1.5 text-sm text-ink-muted hover:text-ink">
+          <ArrowLeft className="size-4" aria-hidden />
+          {back.label}
+        </Link>
+      )}
       <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
         <div className="min-w-0">
           <h1 className="text-[1.375rem] leading-tight font-semibold tracking-tight">{title}</h1>

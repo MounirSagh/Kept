@@ -87,6 +87,7 @@ describe("runAccountAgents", () => {
     openFlags: [],
     pendingActions: [],
     memories: ["Halcyon prefers email over calls."],
+    datasets: [],
     history: ["Renewal date moved from 2026-12-01 to 2026-10-14 on 2026-09-02 (Halcyon order form.pdf, approved by Priya)."],
     tools: { linearTeams: [{ key: "ENG", name: "Engineering" }], crmTasks: true },
   };
@@ -102,15 +103,15 @@ describe("runAccountAgents", () => {
 
   it("loops back for evidence, then turns approved findings into checked proposals", async () => {
     const { model, calls } = scriptedChatModel({
-      planner: { summary: "Renewal in 3 days with an SSO promise open.", questions: [{ question: "Will the SSO fix ship before the 14th?", why: "Renewal depends on it", commitments: ["C1"], searches: ["SSO fix"] }] },
+      planner: { summary: "Renewal in 3 days with an SSO promise open.", questions: [{ question: "Will the SSO fix ship before the 14th?", why: "Renewal depends on it", commitments: ["C1"], searches: ["SSO fix"], datasets: [] }] },
       investigator: (_user: string, n: number) =>
         n === 0
           ? { answer: "No evidence yet.", status: "unclear", citations: [] }
           : { answer: "Engineering moved the fix to next sprint.", status: "contradicted", citations: [{ ref: "S2", stance: "contradicts", excerpt: "No ETA yet, moving to next sprint." }] },
       critic: (_user: string, n: number) =>
         n === 0
-          ? { reviews: [{ questionId: "Q1", verdict: "needs_evidence", reason: "Check the ticket", searches: ["SSO ticket"] }] }
-          : { reviews: [{ questionId: "Q1", verdict: "approved", reason: "Backed by the ticket", searches: [] }] },
+          ? { reviews: [{ questionId: "Q1", verdict: "needs_evidence", reason: "Check the ticket", searches: ["SSO ticket"], datasets: [] }] }
+          : { reviews: [{ questionId: "Q1", verdict: "approved", reason: "Backed by the ticket", searches: [], datasets: [] }] },
       advisor: {
         flags: [
           { kind: "deadline_risk", title: "SSO fix will miss Halcyon's renewal", explanation: "Promised for the 14th; the ticket moved to next sprint.", severity: "high", confidence: 0.85, commitment: "C1", topic: "SSO fix", evidence: [{ ref: "S2", stance: "contradicts", excerpt: "moving to next sprint" }, { ref: "S2", stance: "supports", excerpt: "made up words" }] },
@@ -146,9 +147,9 @@ describe("runAccountAgents", () => {
     const finding = { answer: "Moved to next sprint.", status: "contradicted", citations: [{ ref: "S2", stance: "contradicts", excerpt: "No ETA yet, moving to next sprint." }] };
     const ev = (excerpt: string) => ({ ref: "S2", stance: "contradicts", excerpt });
     const { model } = scriptedChatModel({
-      planner: { summary: "x", questions: [{ question: "Will SSO ship?", why: "Renewal", commitments: ["C1"], searches: ["SSO ticket"] }] },
+      planner: { summary: "x", questions: [{ question: "Will SSO ship?", why: "Renewal", commitments: ["C1"], searches: ["SSO ticket"], datasets: [] }] },
       investigator: finding,
-      critic: { reviews: [{ questionId: "Q1", verdict: "approved", reason: "Backed", searches: [] }] },
+      critic: { reviews: [{ questionId: "Q1", verdict: "approved", reason: "Backed", searches: [], datasets: [] }] },
       advisor: {
         flags: [
           { kind: "unkept_promise", title: "SSO missed", explanation: "a", severity: "high", confidence: 0.7, commitment: "C1", topic: "SSO", evidence: [ev('"No ETA yet, moving to next sprint."'), ev("No ETA yet, moving to next sprint.")] },
@@ -166,8 +167,8 @@ describe("runAccountAgents", () => {
   });
 
   it("raises a flag about a promise only when it adds to the commitments list", async () => {
-    const approve = { reviews: [{ questionId: "Q1", verdict: "approved", reason: "ok", searches: [] }] };
-    const planner = { summary: "x", questions: [{ question: "SSO?", why: "y", commitments: ["C1"], searches: ["SSO ticket"] }] };
+    const approve = { reviews: [{ questionId: "Q1", verdict: "approved", reason: "ok", searches: [], datasets: [] }] };
+    const planner = { summary: "x", questions: [{ question: "SSO?", why: "y", commitments: ["C1"], searches: ["SSO ticket"], datasets: [] }] };
     const investigator = { answer: "a", status: "unclear", citations: [] };
     const flag = (evidence: { ref: string; stance: string; excerpt: string }[]) => ({
       flags: [{ kind: "deadline_risk", title: "SSO due soon", explanation: "e", severity: "medium", confidence: 0.6, commitment: "C1", topic: "SSO", evidence }],
@@ -193,10 +194,10 @@ describe("runAccountAgents", () => {
 
   it("drops a question instead of re-reviewing it when a second look finds nothing new", async () => {
     const { model, calls } = scriptedChatModel({
-      planner: { summary: "x", questions: [{ question: "Will SSO ship?", why: "Renewal", commitments: ["C1"], searches: ["SSO fix"] }] },
+      planner: { summary: "x", questions: [{ question: "Will SSO ship?", why: "Renewal", commitments: ["C1"], searches: ["SSO fix"], datasets: [] }] },
       investigator: { answer: "Only the promise itself.", status: "unclear", citations: [] },
       // Asks for a search that finds nothing beyond what was already read.
-      critic: { reviews: [{ questionId: "Q1", verdict: "needs_evidence", reason: "Find an update", searches: ["SSO status update"] }] },
+      critic: { reviews: [{ questionId: "Q1", verdict: "needs_evidence", reason: "Find an update", searches: ["SSO status update"], datasets: [] }] },
     });
     const steps: StepRecord[] = [];
     const result = await runAccountAgents(ctx, { model, tools, onStep: (s) => void steps.push(s) });
@@ -210,8 +211,8 @@ describe("runAccountAgents", () => {
       planner: {
         summary: "x",
         questions: [
-          { question: "Will SSO ship?", why: "Renewal", commitments: ["C1"], searches: ["SSO fix"] },
-          { question: "Is Lina unhappy?", why: "Churn", commitments: [], searches: ["Lina"] },
+          { question: "Will SSO ship?", why: "Renewal", commitments: ["C1"], searches: ["SSO fix"], datasets: [] },
+          { question: "Is Lina unhappy?", why: "Churn", commitments: [], searches: ["Lina"], datasets: [] },
         ],
       },
       investigator: (user: string) =>
@@ -220,8 +221,8 @@ describe("runAccountAgents", () => {
           : { answer: "Not enough.", status: "unclear", citations: [] },
       critic: (_user: string, n: number) =>
         n === 0
-          ? { reviews: [{ questionId: "Q1", verdict: "needs_evidence", reason: "Check the ticket", searches: ["SSO ticket"] }, { questionId: "Q2", verdict: "approved", reason: "Fine", searches: [] }] }
-          : { reviews: [{ questionId: "Q1", verdict: "approved", reason: "Backed", searches: [] }] },
+          ? { reviews: [{ questionId: "Q1", verdict: "needs_evidence", reason: "Check the ticket", searches: ["SSO ticket"], datasets: [] }, { questionId: "Q2", verdict: "approved", reason: "Fine", searches: [], datasets: [] }] }
+          : { reviews: [{ questionId: "Q1", verdict: "approved", reason: "Backed", searches: [], datasets: [] }] },
       advisor: { flags: [], actions: [] },
     });
     await runAccountAgents(ctx, { model, tools, onStep: () => undefined });
@@ -311,14 +312,15 @@ describe("tool actions", () => {
     openFlags: [],
     pendingActions: [],
     memories: [],
+    datasets: [],
     history: ["Lina Park (lina@halcyon.com) was a contact at Northwind until 2026-08-01."],
   } satisfies Omit<AccountContext, "tools">;
   const tools = { search: async () => [], read: async () => [base.recent[0]!] };
   const none = { emailTo: [], emailSubject: null, emailBody: null, remindOn: null, message: null };
   const script = {
-    planner: { summary: "s", questions: [{ question: "Is the export tracked?", why: "w", commitments: [], searches: ["export"] }] },
+    planner: { summary: "s", questions: [{ question: "Is the export tracked?", why: "w", commitments: [], searches: ["export"], datasets: [] }] },
     investigator: { answer: "Customer is waiting.", status: "supported", citations: [{ ref: "S1", stance: "supports", excerpt: "Any news on the CSV export you promised?" }] },
-    critic: { reviews: [{ questionId: "Q1", verdict: "approved", reason: "ok", searches: [] }] },
+    critic: { reviews: [{ questionId: "Q1", verdict: "approved", reason: "ok", searches: [], datasets: [] }] },
     advisor: {
       flags: [],
       actions: [
@@ -349,5 +351,52 @@ describe("tool actions", () => {
     const result = await runAccountAgents({ ...base, tools: { linearTeams: [], crmTasks: false } }, { model, tools, onStep: () => {} });
     expect(result.actions).toEqual([]);
     expect(calls.find((c) => c.name === "advisor")!.system).not.toContain("create_ticket files");
+  });
+});
+
+describe("live data through Zetaris", () => {
+  const usage: SourceDoc = {
+    id: "zetaris-usage", provider: "zetaris", title: "Zetaris · Product usage by month", author: null, occurredAt: new Date("2026-10-26"),
+    content: "month | active_vehicles | sso_logins\n2026-10 | 74 | 0\n2026-09 | 118 | 0",
+  };
+  const ctx: AccountContext = {
+    today: "2026-10-26",
+    org: { name: "Orbit Fleet", emailSignature: null },
+    account: { name: "Halcyon Freight", domain: "halcyonfreight.com", ownerName: "Mounir", renewalDate: "2026-11-20", annualValue: "$64,800", healthScore: null, about: null },
+    contacts: [],
+    commitments: [],
+    recent: [],
+    openFlags: [],
+    pendingActions: [],
+    memories: [],
+    history: [],
+    datasets: [{ name: "Product usage by month", description: "Active vehicles and logins per month" }],
+    tools: { linearTeams: [], crmTasks: false },
+  };
+
+  it("queries the datasets the planner picks and lets the findings cite their rows", async () => {
+    const queried: string[] = [];
+    const tools = {
+      search: async () => [],
+      read: async () => [],
+      queryData: async (name: string) => (queried.push(name), name === "Product usage by month" ? usage : null),
+    };
+    const { model, calls } = scriptedChatModel({
+      planner: { summary: "s", questions: [{ question: "Is usage dropping before the renewal?", why: "w", commitments: [], searches: ["usage"], datasets: ["Product usage by month", "Made-up dataset"] }] },
+      investigator: { answer: "Active vehicles fell from 118 to 74.", status: "supported", citations: [{ ref: "S1", stance: "supports", excerpt: "2026-10 | 74 | 0" }, { ref: "S1", stance: "supports", excerpt: "2026-10 | 99 | 0" }] },
+      critic: { reviews: [{ questionId: "Q1", verdict: "approved", reason: "ok", searches: [] }] },
+      advisor: {
+        flags: [{ kind: "churn_signal", title: "Halcyon usage down 37% before renewal", explanation: "e", severity: "high", confidence: 0.8, commitment: null, topic: "usage drop", evidence: [{ ref: "S1", stance: "supports", excerpt: "2026-10 | 74 | 0" }] }],
+        actions: [],
+      },
+    });
+    const result = await runAccountAgents(ctx, { model, tools, onStep: () => {} });
+    // Only datasets that exist are queried.
+    expect(queried).toEqual(["Product usage by month"]);
+    expect(calls.find((c) => c.name === "planner")!.user).toContain("- Product usage by month: Active vehicles and logins per month");
+    expect(calls.find((c) => c.name === "investigator")!.user).toContain("2026-10 | 74 | 0");
+    // An invented row is dropped; the real one becomes the flag's evidence, tied to the saved table.
+    expect(result.findings[0]!.citations.map((c) => c.excerpt)).toEqual(["2026-10 | 74 | 0"]);
+    expect(result.flags[0]!.evidence).toEqual([{ sourceItemId: "zetaris-usage", commitmentId: null, stance: "supports", excerpt: "2026-10 | 74 | 0" }]);
   });
 });

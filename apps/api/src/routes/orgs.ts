@@ -10,6 +10,7 @@ import * as invitations from "../controllers/invitations.controller.js";
 import * as members from "../controllers/members.controller.js";
 import * as orgs from "../controllers/orgs.controller.js";
 import * as routing from "../controllers/routing.controller.js";
+import * as zetaris from "../controllers/zetaris.controller.js";
 import * as teams from "../controllers/teams.controller.js";
 import { requireOrgAccess } from "../middlewares/auth.js";
 import { agentRunsRouter } from "./agent-runs.js";
@@ -82,5 +83,14 @@ orgsRouter.get("/:orgId/connections", member, connections.list);
 orgsRouter.post("/:orgId/connections/:provider/authorize", member, connections.authorize);
 orgsRouter.post("/:orgId/connections/:connectionId/sync", member, connections.sync);
 orgsRouter.delete("/:orgId/connections/:connectionId", member, connections.remove);
+
+// Zetaris: owners only, checked in the service.
+orgsRouter.get("/:orgId/zetaris", member, zetaris.get);
+orgsRouter.put("/:orgId/zetaris", member, zetaris.connect);
+orgsRouter.delete("/:orgId/zetaris", member, zetaris.disconnect);
+orgsRouter.post("/:orgId/zetaris/datasets", member, zetaris.addDataset);
+orgsRouter.put("/:orgId/zetaris/datasets/:datasetId", member, zetaris.updateDataset);
+orgsRouter.delete("/:orgId/zetaris/datasets/:datasetId", member, zetaris.deleteDataset);
+orgsRouter.post("/:orgId/zetaris/test", member, zetaris.test);
 
 orgsRouter.use("/:orgId/agent-runs", member, agentRunsRouter);

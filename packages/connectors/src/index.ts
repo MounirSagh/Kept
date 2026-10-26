@@ -11,3 +11,4 @@ export * from "./files.js";
 export { MAX_CONTENT_CHARS } from "./text.js";
 export { createLinearIssue } from "./providers/linear.js";
 export { createHubspotTask } from "./providers/hubspot.js";
+export * from "./zetaris.js";

@@ -20,7 +20,8 @@ import { createMatchProcessor } from "./matching/run.js";
 import { createSourceSyncProcessor } from "./sync-source.js";
 
 const prisma = createPrismaClient(env.DATABASE_URL);
-const connection = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
+// family 0: IPv4 or IPv6, as private networks like Railway's are IPv6 only.
+const connection = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null, family: 0 });
 
 /** A lock in Redis, shared by every worker process; released only by its holder. */
 const redisLock = {
@@ -43,7 +44,9 @@ const agentRunQueue = new Queue<AgentRunJobData>(AGENT_RUN_QUEUE, {
   connection,
   defaultJobOptions: { attempts: 3, backoff: { type: "exponential", delay: 10_000 }, removeOnComplete: 1000, removeOnFail: 5000 },
 });
-const worker = new Worker<AgentRunJobData>(AGENT_RUN_QUEUE, createAgentRunProcessor(prisma, model), {
+const connectors = connectorConfig(process.env);
+
+const worker = new Worker<AgentRunJobData>(AGENT_RUN_QUEUE, createAgentRunProcessor(prisma, model, connectors?.encryptionKey ?? null), {
   connection,
   concurrency: env.WORKER_CONCURRENCY,
 });
@@ -74,7 +77,6 @@ emailWorker.on("failed", (job, err) => {
   console.error(`email "${job?.data.subject}" to ${job?.data.to} ${final ? "failed" : "will retry"}: ${err.message}`);
 });
 
-const connectors = connectorConfig(process.env);
 if (!connectors) console.warn("TOKEN_ENCRYPTION_KEY not set: source sync jobs will fail until it is");
 const sourceSyncQueue = new Queue<SourceSyncJobData>(SOURCE_SYNC_QUEUE, { connection });
 const matchQueue = new Queue<MatchJobData>(MATCH_QUEUE, { connection });

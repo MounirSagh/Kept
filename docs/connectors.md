@@ -147,6 +147,29 @@ companies or deals. After adding them, run `hs project upload` and reconnect Hub
 requested scopes differ from the app's required scopes. If notes fail to sync with a scope
 error, add the scope it names to both.
 
+## Zetaris
+
+Zetaris is the org's data harness: it reaches warehouses, billing, CRMs and files where they live.
+Kept's agents query it **live** during a review, so a flag can quote "2026-10 | 74 | 81" from the
+usage table next to a Slack message.
+
+- **Connect:** an owner, on Integrations → Zetaris. Give the engine's REST API address
+  (`http://<host>:8888/api/v1.0`) or the Zetaris web app's address, the numeric organization id
+  (Management → Organisation) and an API key. Kept checks the connection with `SELECT 1`, then stores
+  the key encrypted.
+- **Datasets:** owners add read-only queries the agents may run, each filtered to the company under
+  review with `{{domain}}`, `{{account_name}}`, `{{crm_id}}` (HubSpot company id) or `{{account_id}}`.
+  Kept fills them in as SQL literals. It refuses queries that aren't a single SELECT, or that aren't
+  filtered to one company, so one client's flag never shows another client's rows. A company missing
+  a value (no domain, say) isn't queried. "Run" previews a dataset for any company before saving.
+- **During a review:** the planner sees each dataset's name and description and picks which to check
+  for each question. The investigator runs them live and may only quote rows it received. Each result
+  is saved on the company as a `dataset` item (labeled "Zetaris" in flag evidence), replaced on the
+  next query, and never read for commitments.
+- **Registering sources in Zetaris** happens in Zetaris, for example
+  `CREATE DATASOURCE … OPTIONS (jdbcdriver "org.postgresql.Driver", jdbcurl "jdbc:postgresql://…", …)`,
+  then `REGISTER DATASOURCE TABLES FROM <name>`. Tables are then named `<datasource>.<table>`.
+
 ## Verified so far
 
 Every connector is tested against recorded-style API responses (`pnpm --filter @kept/connectors

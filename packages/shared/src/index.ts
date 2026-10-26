@@ -532,3 +532,50 @@ export interface ContactsQuery {
   accountId?: string;
   source?: "crm" | "kept";
 }
+
+/* Zetaris ------------------------------------------------------------------------------------- */
+
+/** A read-only query the agents can run live for one company; {{domain}} etc. are filled in for it. */
+export interface ZetarisDatasetDto {
+  id: string;
+  name: string;
+  description: string;
+  sql: string;
+}
+
+export interface ZetarisDto {
+  connected: boolean;
+  /** The engine's REST base (…/api/v1.0) or the web app's address. */
+  restUrl: string | null;
+  zetarisOrgId: string | null;
+  lastError: string | null;
+  datasets: ZetarisDatasetDto[];
+  /** Parameters a dataset can use. */
+  params: string[];
+}
+
+export interface ZetarisConnectInput {
+  restUrl: string;
+  zetarisOrgId: string;
+  /** Required the first time; left out to keep the stored key. */
+  apiKey?: string;
+}
+
+export interface ZetarisDatasetInput {
+  name: string;
+  description: string;
+  sql: string;
+}
+
+export interface ZetarisTestInput {
+  sql: string;
+  accountId: string;
+}
+
+export interface ZetarisTestDto {
+  /** The SQL as run for that company, or null when it doesn't apply to it. */
+  sql: string | null;
+  columns: string[];
+  rows: unknown[][];
+  note: string | null;
+}

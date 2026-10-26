@@ -1,6 +1,11 @@
 import { useAuth } from "@clerk/react";
 import { useMemo } from "react";
 import type {
+  ZetarisConnectInput,
+  ZetarisDatasetInput,
+  ZetarisDto,
+  ZetarisTestDto,
+  ZetarisTestInput,
   AcceptedInvitationDto,
   ActionDecisionInput,
   ActionsDto,
@@ -122,6 +127,19 @@ export function useApi() {
         request<void>(`/orgs/${orgId}/connections/${connectionId}`, { method: "DELETE" }),
 
       accounts: (orgId: string) => request<AccountDto[]>(`/orgs/${orgId}/accounts`),
+
+      zetaris: (orgId: string) => request<ZetarisDto>(`/orgs/${orgId}/zetaris`),
+      connectZetaris: (orgId: string, input: ZetarisConnectInput) =>
+        request<ZetarisDto>(`/orgs/${orgId}/zetaris`, { method: "PUT", body: JSON.stringify(input) }),
+      disconnectZetaris: (orgId: string) => request<void>(`/orgs/${orgId}/zetaris`, { method: "DELETE" }),
+      addZetarisDataset: (orgId: string, input: ZetarisDatasetInput) =>
+        request<ZetarisDto>(`/orgs/${orgId}/zetaris/datasets`, { method: "POST", body: JSON.stringify(input) }),
+      updateZetarisDataset: (orgId: string, datasetId: string, input: ZetarisDatasetInput) =>
+        request<ZetarisDto>(`/orgs/${orgId}/zetaris/datasets/${datasetId}`, { method: "PUT", body: JSON.stringify(input) }),
+      deleteZetarisDataset: (orgId: string, datasetId: string) =>
+        request<ZetarisDto>(`/orgs/${orgId}/zetaris/datasets/${datasetId}`, { method: "DELETE" }),
+      testZetarisDataset: (orgId: string, input: ZetarisTestInput) =>
+        request<ZetarisTestDto>(`/orgs/${orgId}/zetaris/test`, { method: "POST", body: JSON.stringify(input) }),
       createAccount: (orgId: string, input: AccountBody) =>
         request<AccountDto>(`/orgs/${orgId}/accounts`, { method: "POST", body: JSON.stringify(input) }),
       updateAccount: (orgId: string, accountId: string, input: AccountBody) =>

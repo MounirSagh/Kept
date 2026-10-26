@@ -91,6 +91,11 @@ function decide(candidates: Map<string, string>, what: string): MatchResult {
 }
 
 export function matchItem(input: MatchInput, ctx: MatchContext): MatchResult {
+  // 0. Items Kept made for one account (live data from Zetaris) stay with it.
+  if (typeof input.metadata.pinnedAccountId === "string") {
+    return { status: "matched", accountId: input.metadata.pinnedAccountId, reason: "Zetaris data for this company" };
+  }
+
   // 1. Owner mapping of the container.
   if (input.containerId) {
     const mapping = ctx.mappings.get(`${input.connectionId}:${input.containerId}`);

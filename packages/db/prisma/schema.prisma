@@ -165,6 +165,8 @@ enum Provider {
   hubspot
   zendesk
   salesforce
+  /// Zetaris: the org's data harness, queried live by the agents (API key, not OAuth).
+  zetaris
 }
 
 enum ConnectionStatus {
@@ -334,6 +336,8 @@ enum SourceKind {
   transcript
   event
   crm_record
+  /// A table of live data (from Zetaris) about one account, kept as evidence. Not read for commitments.
+  dataset
 }
 
 model SourceItem {

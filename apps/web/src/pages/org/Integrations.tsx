@@ -1,5 +1,5 @@
 import {
-  Briefcase, CircleDot, Cloud, Database, FileText, Inbox, Mail, MessageSquare, RefreshCw, type LucideIcon,
+  Briefcase, CircleDot, FileText, Inbox, Mail, MessageSquare, RefreshCw, type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
@@ -9,6 +9,7 @@ import { memberName, useOrg } from "../../app/org-context";
 import { ConfirmDialog } from "../../components/Modal";
 import { Loading, Page, Section } from "../../components/Page";
 import { cx, ui } from "../../ui";
+import { ZetarisSection } from "./ZetarisSection";
 
 const ICONS: Record<ProviderId, LucideIcon> = {
   microsoft: Mail,
@@ -18,13 +19,6 @@ const ICONS: Record<ProviderId, LucideIcon> = {
   notion: FileText,
   hubspot: Briefcase,
 };
-
-const VIA_ZETARIS: { name: string; reads: string; icon: LucideIcon }[] = [
-  { name: "Salesforce", reads: "Accounts, owners, opportunities and renewal dates.", icon: Briefcase },
-  { name: "Microsoft Dynamics 365", reads: "Accounts, contacts and opportunities.", icon: Briefcase },
-  { name: "Amazon S3 and Azure Blob", reads: "Contracts and SOWs stored as files.", icon: Cloud },
-  { name: "Data warehouses", reads: "Snowflake, BigQuery, Redshift and others, for usage and revenue data.", icon: Database },
-];
 
 function timeAgo(iso: string): string {
   const minutes = Math.round((Date.now() - Date.parse(iso)) / 60_000);
@@ -122,7 +116,7 @@ export function IntegrationsPage() {
   return (
     <Page
       title="Integrations"
-      description="Kept reads from the tools you connect, never writes to them, and only sends anything after someone approves it."
+      description="Kept reads from the tools you connect, and only sends or creates anything after someone approves it."
     >
       {connectedName && (
         <div className={`${ui.notice} flex items-center justify-between gap-4`} role="status">
@@ -176,20 +170,7 @@ export function IntegrationsPage() {
         </Section>
       )}
 
-      <Section title="Through Zetaris">
-        <ul className="divide-y divide-line rounded-lg border border-line">
-          {VIA_ZETARIS.map(({ name, reads, icon }) => (
-            <li key={name} className="flex items-center gap-4 px-4 py-3.5">
-              <IconBox icon={icon} />
-              <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium">{name}</p>
-                <p className={ui.hint}>{reads}</p>
-              </div>
-              <span className="text-xs text-ink-faint">Coming soon</span>
-            </li>
-          ))}
-        </ul>
-      </Section>
+      <ZetarisSection canManage={can(actor, { action: "org.manage" })} />
 
       {removing && (
         <ConfirmDialog

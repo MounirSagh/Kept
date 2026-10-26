@@ -7,6 +7,7 @@ import {
 import { canAct } from "@kept/connectors";
 import type { ActionPayload, AgentRunJobData, CrmTaskPayload, ReminderPayload, SendEmailPayload, TicketPayload } from "@kept/shared";
 import { recallForAccount } from "./memory.js";
+import { accountData } from "./data.js";
 import { accountHistory, openWorld, syncAccountWorld } from "./world.js";
 
 const COMMITMENT_LIMIT = 60;
@@ -107,7 +108,8 @@ export async function loadAccountContext(prisma: PrismaClient, orgId: string, ac
       take: COMMITMENT_LIMIT,
     }),
     prisma.sourceItem.findMany({
-      where: { orgId, accountId, matchStatus: "matched", deletedAt: null, kind: { not: "crm_record" } },
+      // CRM records and live data tables aren't activity.
+      where: { orgId, accountId, matchStatus: "matched", deletedAt: null, kind: { notIn: ["crm_record", "dataset"] } },
       select: { id: true, title: true, author: true, occurredAt: true, contentText: true, connection: { select: { provider: true } } },
       orderBy: { occurredAt: "desc" },
       take: RECENT_LIMIT,
@@ -166,6 +168,8 @@ export async function loadAccountContext(prisma: PrismaClient, orgId: string, ac
     pendingActions: pending.map((a) => describeAction(a.type, a.payload)),
     memories,
     history,
+    // Filled in by the run when Zetaris is connected.
+    datasets: [],
     tools,
   };
 }
@@ -236,7 +240,7 @@ const STALE_RUN_MS = 30 * 60 * 1000;
 /** A run that finds its account already under review waits this long and tries again. */
 const RETRY_BUSY_MS = 30_000;
 
-export function createAgentRunProcessor(prisma: PrismaClient, model: ChatModel | null) {
+export function createAgentRunProcessor(prisma: PrismaClient, model: ChatModel | null, encryptionKey: string | null = null) {
   return async (job: Job<AgentRunJobData>, token?: string) => {
     const { runId } = job.data;
     const run = await prisma.agentRun.findUnique({ where: { id: runId } });
@@ -302,11 +306,14 @@ export function createAgentRunProcessor(prisma: PrismaClient, model: ChatModel |
     };
 
     try {
-      const ctx = await loadAccountContext(prisma, orgId, accountId);
+      const account = await prisma.account.findFirstOrThrow({ where: { id: accountId, orgId }, select: { id: true, name: true, domain: true, crmExternalId: true } });
+      // Live data through Zetaris, when connected: the planner sees what exists, the investigator queries it.
+      const data = await accountData(prisma, encryptionKey, orgId, account);
+      const ctx = { ...(await loadAccountContext(prisma, orgId, accountId)), datasets: data.available };
       const tracing = process.env.LANGSMITH_TRACING === "true";
       const result = await runAccountAgents(
         ctx,
-        { model, tools: accountTools(prisma, orgId, accountId), onStep },
+        { model, tools: { ...accountTools(prisma, orgId, accountId), queryData: data.query }, onStep },
         // The LangSmith trace takes the run's id, so a run links straight to its trace.
         { runId: tracing ? runId : undefined, runName: `account-run ${ctx.account.name}`, tags: [`org:${orgId}`], metadata: { orgId, accountId, runId } },
       );

@@ -174,6 +174,10 @@ The original design for context, which the built pipeline follows:
 
 **Markovian** (phase 2) bounds each step's context so long account histories don't grow token cost.
 
+### 5a. Live data through Zetaris (built)
+
+Owners connect Zetaris (REST, API key, encrypted) and define **datasets**: single read-only SELECTs filtered to one account with `{{domain}}`, `{{account_name}}`, `{{crm_id}}` or `{{account_id}}`, bound as SQL literals (`packages/connectors/src/zetaris.ts`). For each run, `accountData` (`apps/worker/src/agents/data.ts`) lists the datasets that apply to the account. The planner picks datasets per question; the investigator calls `queryData`, which runs the query live (once per run per dataset) and saves the table as a `dataset` source item pinned to the account (`metadata.pinnedAccountId`; matching keeps it there, extraction skips it). Citations from tables are checked like any excerpt, so a flag's evidence is a real row. A failed query leaves the run going and records the error on the connection.
+
 ### 6. Analytics through Zetaris
 
 Zetaris queries a read replica of Kept's Postgres next to the org's own sources. Reports like "commitments kept vs broken by team, against renewal outcomes in the CRM" don't need data copied anywhere.

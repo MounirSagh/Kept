@@ -2,7 +2,10 @@ import { z } from "zod";
 
 const schema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]),
-  API_PORT: z.coerce.number().int().positive(),
+  // Hosts like Railway assign the port in PORT.
+  API_PORT: z.preprocess((v) => v || process.env.PORT, z.coerce.number().int().positive()),
+  // When set, the API also serves the built web app from this folder (one service for both).
+  WEB_DIST: z.preprocess((v) => v || undefined, z.string().optional()),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
   WEB_ORIGIN: z.url(),

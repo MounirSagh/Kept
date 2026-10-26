@@ -96,7 +96,7 @@ export async function extractOrg(prisma: PrismaClient, model: ChatModel, orgId: 
   const pending = await prisma.$queryRaw<{ id: string }[]>`
     SELECT id FROM source_items
     WHERE org_id = ${orgId}::uuid AND match_status = 'matched' AND deleted_at IS NULL
-      AND kind <> 'crm_record' AND extracted_hash IS DISTINCT FROM content_hash
+      AND kind NOT IN ('crm_record', 'dataset') AND extracted_hash IS DISTINCT FROM content_hash
       -- Files are extracted once read (or OCR'd); until then they're only a name.
       AND (kind <> 'document' OR coalesce(metadata->>'contentStatus', 'read') IN ('read', 'ocr'))
     ORDER BY occurred_at ASC

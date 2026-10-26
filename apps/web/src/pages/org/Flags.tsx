@@ -58,6 +58,7 @@ const KIND: Record<FlagKindValue, string> = {
 };
 
 const PROVIDER: Record<string, string> = {
+  zetaris: "Zetaris",
   google: "Gmail",
   microsoft: "Outlook",
   slack: "Slack",

@@ -168,6 +168,8 @@ Your tools ──► Sync ──► Routing ──► Extraction ──► Agent
    - **Critic:** rejects anything the quotes don't support.
    - **Advisor:** raises flags and drafts actions.
 
+   With **Zetaris** connected, the agents also query live data (product usage, support tickets, invoices, anything registered in Zetaris) through datasets an owner defines, and quote the rows they rely on.
+
    Besides the company's recent messages, the agents read its history from the World Model: how its renewal date and contract value changed and why, its track record of kept and broken promises, and contacts who joined from or left for another client.
 6. **Approvals.** Every suggested email, reminder, alert, company update, Linear issue and HubSpot task waits on the **Approvals** page to be edited, approved or rejected.
 7. **Executor.** Approved emails go out from the approver's own Gmail or Outlook. Reminders and alerts are emailed to the account owner. Linear issues are filed in the team chosen on approval; HubSpot tasks are added to the company's record and assigned to the account owner when their email matches a HubSpot user.
@@ -231,6 +233,18 @@ pnpm stack:up     # builds images, applies migrations, starts api, worker and we
 pnpm stack:down
 ```
 
+### Deploying to Railway
+
+One public service serves both the API and the web app; the worker and Redis run beside it. Postgres can be any managed Postgres with pgvector (Neon works).
+
+| Railway service | Config file | Notes |
+| --- | --- | --- |
+| **app** | `deploy/railway.app.json` | Builds `deploy/app.Dockerfile`, runs migrations before each deploy, health check `/api/health`. Generate a public domain |
+| **worker** | `deploy/railway.worker.json` | Builds `deploy/worker.Dockerfile`. No public domain |
+| **Redis** | Railway's Redis | Reference it as `REDIS_URL=${{Redis.REDIS_URL}}` |
+
+Set `WEB_ORIGIN` to the app's public URL (`https://${{RAILWAY_PUBLIC_DOMAIN}}` on the app, `https://${{app.RAILWAY_PUBLIC_DOMAIN}}` on the worker), set `VITE_CLERK_PUBLISHABLE_KEY` on the app (it's baked into the web build), and register `<WEB_ORIGIN>/oauth/callback` in each tool's OAuth app. `.env` files with inline comments or spaces around `=` must be cleaned before pasting into Railway.
+
 ---
 
 ## Troubleshooting
@@ -252,6 +266,7 @@ pnpm stack:down
 | **A contract isn't on the company page** | It must reach the client: attached to their email, shared with their address in Drive/OneDrive, in a folder mapped on **Routing**, or linked in one of their channels |
 | **A Linear issue or HubSpot task fails with "Reconnect…"** | Kept needs permission to create records: reconnect Linear (`issues:create`) or HubSpot (`crm.objects.contacts.write`, `crm.objects.owners.read`; upload the HubSpot app first with `hs project upload`) |
 | **No Linear issue or HubSpot task is ever suggested** | Linear: Kept offers teams it has seen in synced issues. HubSpot: only for companies imported from HubSpot |
+| **Zetaris: "refused the API key" or "answered with a web page"** | Check the organization id and key, and use the engine's `…/api/v1.0` address or the Zetaris web app's root address |
 | **Database errors after pulling new code** | Run `pnpm db:deploy` to apply new migrations |
 
 More detail: [docs/architecture.md](docs/architecture.md) (how the system is built) and [docs/connectors.md](docs/connectors.md) (tool setup).

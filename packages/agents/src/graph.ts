@@ -41,6 +41,8 @@ export interface AccountContext {
   memories: string[];
   /** What the World Model knows about the account over time: term changes, track record, people who moved. */
   history: string[];
+  /** Live datasets the agents may query for this account through Zetaris (usage, invoices, tickets...). */
+  datasets: { name: string; description: string }[];
   /** Tools Kept may act in for this account, beyond email, reminders and alerts. */
   tools: {
     /** Linear teams an issue can be filed in. Empty: no Linear issues. */
@@ -63,6 +65,8 @@ export interface SourceDoc {
 export interface InvestigationTools {
   search(query: string, limit: number): Promise<SourceDoc[]>;
   read(ids: string[]): Promise<SourceDoc[]>;
+  /** Runs one of the account's live datasets (Zetaris) and returns its table, or null if it can't. */
+  queryData?(name: string): Promise<SourceDoc | null>;
 }
 
 export type AgentStepName = "planner" | "investigator" | "critic" | "advisor";
@@ -132,6 +136,8 @@ interface Question {
   why: string;
   commitments: string[];
   searches: string[];
+  /** Live datasets to check, by name. */
+  datasets: string[];
 }
 
 /* References --------------------------------------------------------------------------------- */
@@ -195,6 +201,7 @@ function describeContext(ctx: AccountContext, refs: Refs, opts: { full: boolean 
     `Actions waiting for a person to decide:\n${ctx.pendingActions.map((a) => `- ${a}`).join("\n") || "(none)"}`,
     "",
     `Learned from past decisions:\n${ctx.memories.map((m) => `- ${m}`).join("\n") || "(none)"}`,
+    ctx.datasets.length ? `\nLive data you can check (queried now through Zetaris, the company's data platform):\n${ctx.datasets.map((d) => `- ${d.name}: ${d.description}`).join("\n")}` : null,
     "",
     `History of the account (World Model):\n${ctx.history.map((h) => `- ${h}`).join("\n") || "(nothing beyond the above)"}`,
   ]
@@ -224,6 +231,7 @@ const plannerSchema = z.object({
       why: z.string(),
       commitments: z.array(z.string()).describe("Refs of tracked items it concerns, e.g. C2."),
       searches: z.array(z.string()).describe("2 to 4 short keyword searches over the account's messages and documents."),
+      datasets: z.array(z.string()).describe("Names of live datasets to check for this question, exactly as listed. Empty when none would help."),
     }),
   ),
 });
@@ -340,12 +348,14 @@ export async function runAccountAgents(
         schema: plannerSchema,
         system: `${ROLE}
 You are the planner. Decide what is worth checking for this account right now: promises coming due with no sign of delivery, promises that recent messages contradict, customer frustration, renewals at risk.
-Ask at most ${MAX_QUESTIONS} questions, most important first. Ask nothing about what is already flagged or clearly fine. An empty list is a good answer when nothing needs attention.`,
+Ask at most ${MAX_QUESTIONS} questions, most important first. Ask nothing about what is already flagged or clearly fine. An empty list is a good answer when nothing needs attention.
+When live data can confirm or contradict what the messages say (usage dropping, an unpaid invoice, open support tickets), name the datasets to check. Check data that matters to a question, not everything.`,
         user: describeContext(ctx, refs, { full: true }),
       });
       return { output: data, usage };
     });
-    const questions = plan.questions.slice(0, MAX_QUESTIONS).map((q, i) => ({ ...q, id: `Q${i + 1}` }));
+    const known = new Set(ctx.datasets.map((d) => d.name));
+    const questions = plan.questions.slice(0, MAX_QUESTIONS).map((q, i) => ({ ...q, datasets: q.datasets.filter((d) => known.has(d)), id: `Q${i + 1}` }));
     return { summary: plan.summary, questions, findings: {}, pending: [], toReview: [], seen: {}, approved: [], rounds: 0, flags: [], actions: [] };
   };
 
@@ -360,6 +370,13 @@ Ask at most ${MAX_QUESTIONS} questions, most important first. Ask nothing about 
   ): Promise<{ finding: Finding; usage: Usage; read: string[] } | null> => {
     // Gather: the items behind the commitments in question, then search hits (the critic's first, on a second look).
     const docs = new Map<string, SourceDoc>();
+    // Live data first: it's what the planner asked to check, and it isn't in the messages.
+    if (deps.tools.queryData) {
+      for (const name of q.datasets) {
+        const table = await deps.tools.queryData(name);
+        if (table) docs.set(table.id, table);
+      }
+    }
     const linked = q.commitments.map((r) => refs.commitments.get(r)?.sourceItemId).filter((id): id is string => !!id);
     for (const d of await deps.tools.read(linked)) docs.set(d.id, d);
     for (const s of [...extraSearches, ...q.searches]) {
@@ -367,7 +384,9 @@ Ask at most ${MAX_QUESTIONS} questions, most important first. Ask nothing about 
     }
     if (seen && [...docs.keys()].every((id) => seen.includes(id))) return null;
     const evidence = [...docs.values()].slice(0, DOCS_PER_QUESTION);
-    const full = await deps.tools.read(evidence.map((d) => d.id));
+    const read = await deps.tools.read(evidence.map((d) => d.id));
+    // What read() can't return (a table that wasn't saved) is used as it came.
+    const full = [...read, ...evidence.filter((d) => !read.some((r) => r.id === d.id))];
     const rendered = full
       .map((d) => `${refs.source(d)} ${d.occurredAt.toISOString().slice(0, 10)} ${d.provider}${d.author ? ` from ${d.author}` : ""}: ${d.title ?? ""}\n${truncate(d.content, 3000)}`)
       .join("\n\n---\n\n");
@@ -382,7 +401,8 @@ Ask at most ${MAX_QUESTIONS} questions, most important first. Ask nothing about 
       tier: "fast",
       schema: investigatorSchema,
       system: `${ROLE}
-You are the investigator. Answer the question using only the evidence given. Cite the items you rely on, with exact excerpts copied from them; excerpts are checked and anything not found is discarded. Say unclear when the evidence doesn't settle it.`,
+You are the investigator. Answer the question using only the evidence given. Cite the items you rely on, with exact excerpts copied from them; excerpts are checked and anything not found is discarded. Say unclear when the evidence doesn't settle it.
+Items from zetaris are live data tables (header line, then one row per line). To cite one, copy a whole row exactly as written, e.g. "2026-10 | 74 | 12".`,
       user: [`Today: ${ctx.today}`, `Account: ${ctx.account.name}`, `Question: ${q.question}`, concerns && `Concerning:\n${concerns}`, "", `Evidence:\n${rendered || "(nothing found)"}`]
         .filter(Boolean)
         .join("\n"),

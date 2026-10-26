@@ -9,10 +9,12 @@ const status = z.enum(["open", "fulfilled", "broken"]);
 const params = z.object({ commitmentId: z.uuid() });
 const listQuery = z.object({
   status: z.enum(["open", "fulfilled", "broken", "unknown", "superseded"]).optional(),
+  type: z.enum(["commitment", "obligation"]).optional(),
   accountId: z.uuid().optional(),
 });
 const body = z.object({
   accountId: z.uuid(),
+  type: z.enum(["commitment", "obligation"]).optional(),
   summary: z.string().trim().min(1).max(2000),
   notes: z.string().trim().max(10_000).nullable().transform((v) => v || null),
   madeBy: z.string().trim().max(200).nullable().transform((v) => v || null),

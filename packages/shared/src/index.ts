@@ -252,15 +252,24 @@ export interface CommitmentDto {
   /** YYYY-MM-DD */
   dueDate: string | null;
   status: "open" | "fulfilled" | "broken" | "unknown" | "superseded";
+  /** "commitment": the team promised it; "obligation": the customer did. */
+  type: PromiseSide;
   origin: "extracted" | "manual" | "import";
   sourceUrl: string | null;
   createdAt: string;
+  /** The page of the document it was quoted from, for promises found in files. */
+  sourcePage: number | null;
   /** The most severe open flag about this commitment: Kept found evidence it's at risk. */
   risk: { flagId: string; severity: SeverityValue; title: string } | null;
 }
 
+/** Who made the promise: the team ("commitment") or the customer ("obligation"). */
+export type PromiseSide = "commitment" | "obligation";
+
 export interface CommitmentInput {
   accountId: string;
+  /** Defaults to "commitment" (a promise the team made). */
+  type?: PromiseSide;
   summary: string;
   notes: string | null;
   madeBy: string | null;
@@ -279,7 +288,11 @@ export interface RoutingContainerDto {
   containerLabel: string;
   itemCount: number;
   lastActivityAt: string;
-  mapping: { accountId: string | null; ignored: boolean } | null;
+  /**
+   * null: nobody routed it. auto: Kept routed it from its name or its people (reason says which),
+   * until an owner confirms or changes it. An owner's "not routed" keeps Kept from routing it.
+   */
+  mapping: { accountId: string | null; ignored: boolean; auto: boolean; reason: string | null } | null;
 }
 
 export interface RoutingDto {
@@ -287,10 +300,16 @@ export interface RoutingDto {
   counts: Partial<Record<MatchStatusValue, number>>;
   /** Slack channels, Linear teams and Notion parents seen in synced data, most recent first. */
   containers: RoutingContainerDto[];
+  /** Whether Kept routes containers by their name and people (on unless an owner turned it off). */
+  auto: boolean;
+}
+
+export interface RoutingSettingsInput {
+  auto: boolean;
 }
 
 export interface RoutingMappingInput {
-  /** null with ignored=false clears the mapping. */
+  /** null with ignored=false: not routed, item by item only (and Kept won't route it). */
   accountId: string | null;
   ignored: boolean;
 }
@@ -310,6 +329,12 @@ export const ACTION_QUEUE = "actions";
 export interface ActionJobData {
   actionId: string;
 }
+
+/**
+ * Ticks hourly. In each org's own time zone it runs the daily sweep (agent runs for accounts with
+ * promises coming due) and sends each person's daily digest, once per local day.
+ */
+export const DAILY_QUEUE = "daily";
 
 /** Stores something Kept learned from a person's decision in H-MEM, for later runs to recall. */
 export const LEARN_QUEUE = "learn";
@@ -363,7 +388,7 @@ export interface FlagDecisionInput {
   note?: string;
 }
 
-export type ActionTypeValue = "send_email" | "schedule_reminder" | "internal_alert";
+export type ActionTypeValue = "send_email" | "schedule_reminder" | "internal_alert" | "update_account" | "create_ticket" | "update_crm";
 export type ActionStatusValue = "pending" | "approved" | "rejected" | "executing" | "done" | "failed";
 
 export interface SendEmailPayload {
@@ -382,7 +407,37 @@ export interface AlertPayload {
   message: string;
 }
 
-export type ActionPayload = SendEmailPayload | ReminderPayload | AlertPayload;
+/** Contract terms Kept read in a document, to set on the company once someone approves. */
+export interface AccountUpdatePayload {
+  /** YYYY-MM-DD */
+  renewalDate: string | null;
+  /** Yearly contract value in currency units, e.g. "48000". */
+  annualValue: string | null;
+  currency: string | null;
+  noticeDays: number | null;
+  /** Where the terms come from, shown to whoever approves. */
+  documentTitle: string;
+  excerpt: string;
+}
+
+/** A Linear issue for the team that has to do the work. */
+export interface TicketPayload {
+  /** Linear team key, e.g. "ENG". */
+  teamKey: string;
+  title: string;
+  /** Markdown. */
+  description: string;
+}
+
+/** A task on the company's HubSpot record, for the account owner. */
+export interface CrmTaskPayload {
+  subject: string;
+  body: string;
+  /** YYYY-MM-DD */
+  dueDate: string;
+}
+
+export type ActionPayload = SendEmailPayload | ReminderPayload | AlertPayload | AccountUpdatePayload | TicketPayload | CrmTaskPayload;
 
 export interface ProposedActionDto {
   id: string;
@@ -400,6 +455,8 @@ export interface ProposedActionDto {
   decisionNote: string | null;
   lastError: string | null;
   executedAt: string | null;
+  /** What running it produced, e.g. the Linear issue's identifier and url. */
+  result: Record<string, unknown> | null;
   createdAt: string;
 }
 
@@ -407,6 +464,8 @@ export interface ActionsDto {
   actions: ProposedActionDto[];
   /** Whether the current user has a Gmail or Outlook connection allowed to send, for approving emails. */
   canSendEmail: boolean;
+  /** Linear teams an issue can be filed in (seen in synced issues), for editing a ticket. */
+  linearTeams: { key: string; name: string }[];
 }
 
 export interface ActionDecisionInput {
@@ -417,6 +476,21 @@ export interface ActionDecisionInput {
 }
 
 /* Paged tables -------------------------------------------------------------------------------- */
+
+/** A file routed to a company: an attachment, a shared or linked file. */
+export interface DocumentDto {
+  id: string;
+  title: string | null;
+  url: string | null;
+  /** Where it came from, e.g. "Gmail attachment", "Slack", "Google Drive". */
+  origin: string;
+  occurredAt: string;
+  /** "pending" until read; then "read", "ocr", "unsupported", "too_large", "no_access", "needs_ocr", "empty" or "failed". */
+  status: string;
+  pages: number | null;
+  /** Why it belongs to this company: "linked from …", "shared with northwind.com"... */
+  reason: string | null;
+}
 
 export interface PageDto<T> {
   items: T[];

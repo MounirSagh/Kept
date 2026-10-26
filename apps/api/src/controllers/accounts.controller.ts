@@ -80,6 +80,11 @@ export async function update(req: Request, res: Response) {
   res.json(await accounts.updateAccount(currentActor(req), accountId, toInput(parse(accountBody, req.body))));
 }
 
+export async function documents(req: Request, res: Response) {
+  const { accountId } = parse(accountParams, req.params);
+  res.json(await accounts.listAccountDocuments(currentActor(req), accountId));
+}
+
 export async function remove(req: Request, res: Response) {
   const { accountId } = parse(accountParams, req.params);
   await accounts.deleteAccount(currentActor(req), accountId);

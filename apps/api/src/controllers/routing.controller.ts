@@ -6,9 +6,15 @@ import * as routing from "../services/routing.service.js";
 
 const mappingParams = z.object({ connectionId: z.uuid(), containerId: z.string().min(1).max(500) });
 const mappingBody = z.object({ accountId: z.uuid().nullable(), ignored: z.boolean() });
+const settingsBody = z.object({ auto: z.boolean() });
 
 export async function get(req: Request, res: Response) {
   res.json(await routing.getRouting(currentActor(req)));
+}
+
+export async function setSettings(req: Request, res: Response) {
+  await routing.setRoutingSettings(currentActor(req), parse(settingsBody, req.body));
+  res.status(204).end();
 }
 
 export async function setMapping(req: Request, res: Response) {

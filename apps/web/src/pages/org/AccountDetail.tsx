@@ -1,7 +1,7 @@
-import { ExternalLink, ListChecks } from "lucide-react";
+import { ExternalLink, FileText, ListChecks } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router";
-import { can, type AccountDto, type CommitmentDto, type ContactDto } from "@kept/shared";
+import { can, type AccountDto, type CommitmentDto, type ContactDto, type DocumentDto } from "@kept/shared";
 import { useApi } from "../../api";
 import { memberName, useOrg } from "../../app/org-context";
 import { EmptyState, Loading, Page } from "../../components/Page";
@@ -11,6 +11,18 @@ import { formatDate } from "./Accounts";
 import { DueDate } from "./Commitments";
 import { RiskBadge } from "./Flags";
 import { ContactDialog } from "./ContactDialog";
+
+/** What happened when Kept tried to read a file, in words; "read" needs no label. */
+const DOCUMENT_STATUS: Record<string, { label: string; tone?: "warn" }> = {
+  pending: { label: "Waiting to be read" },
+  ocr: { label: "Read from a scan" },
+  unsupported: { label: "Format Kept can't read" },
+  too_large: { label: "Too large to read", tone: "warn" },
+  no_access: { label: "No access: reconnect the tool with file access", tone: "warn" },
+  needs_ocr: { label: "Scanned, too long to read", tone: "warn" },
+  empty: { label: "No text" },
+  failed: { label: "Couldn't be read", tone: "warn" },
+};
 
 /** Contacts listed on the company page; the rest are a click away on Contacts. */
 const CONTACTS_SHOWN = 5;
@@ -64,6 +76,8 @@ export function AccountDetailPage() {
   const [account, setAccount] = useState<AccountDto | null>(null);
   const [contacts, setContacts] = useState<ContactDto[] | null>(null);
   const [commitments, setCommitments] = useState<CommitmentDto[] | null>(null);
+  const [theirs, setTheirs] = useState<CommitmentDto[]>([]);
+  const [documents, setDocuments] = useState<DocumentDto[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const manage = can(actor, { action: "account.manage" });
@@ -71,14 +85,18 @@ export function AccountDetailPage() {
   const load = useCallback(async () => {
     if (!accountId) return;
     try {
-      const [a, c, k] = await Promise.all([
+      const [a, c, k, t, d] = await Promise.all([
         api.account(orgId, accountId),
         api.contacts(orgId, accountId),
         api.commitments(orgId, { accountId, status: "open" }),
+        api.commitments(orgId, { accountId, status: "open", type: "obligation" }),
+        api.accountDocuments(orgId, accountId),
       ]);
       setAccount(a);
       setContacts(c);
       setCommitments(k);
+      setTheirs(t);
+      setDocuments(d);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -152,9 +170,71 @@ export function AccountDetailPage() {
               </ul>
             )}
           </section>
+          <section>
+            <h2 className="mb-3 text-sm font-semibold">
+              Documents <span className="font-normal text-ink-muted">{documents.length}</span>
+            </h2>
+            {documents.length === 0 ? (
+              <EmptyState icon={FileText} title="No documents yet">
+                Contracts, order forms and plans appear here when they're attached to emails with {account.name}, shared in
+                its Slack channels, shared with its people in Drive or OneDrive, or linked from its conversations. Kept reads
+                them for commitments and contract terms.
+              </EmptyState>
+            ) : (
+              <ul className="divide-y divide-line rounded-lg border border-line">
+                {documents.map((d) => {
+                  const status = DOCUMENT_STATUS[d.status];
+                  return (
+                    <li key={d.id} className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 px-4 py-3 text-sm">
+                      <div className="min-w-0 flex-1">
+                        {d.url ? (
+                          <a href={d.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium hover:text-brand">
+                            {d.title ?? "Untitled file"} <ExternalLink className="size-3" aria-hidden />
+                          </a>
+                        ) : (
+                          <span className="font-medium">{d.title ?? "Untitled file"}</span>
+                        )}
+                        <p className={ui.hint}>
+                          {d.origin}
+                          {d.pages ? ` · ${d.pages} pages` : ""}
+                          {d.reason ? ` · ${d.reason}` : ""}
+                        </p>
+                      </div>
+                      <span className="flex items-center gap-2 text-[0.8125rem] whitespace-nowrap text-ink-muted">
+                        {status && <span className={status.tone === "warn" ? "text-warn" : undefined}>{status.label}</span>}
+                        {new Date(d.occurredAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
         </div>
 
         <aside className="space-y-8">
+          {theirs.length > 0 && (
+            <SideSection
+              title={<>Their promises <span className="font-normal normal-case">{theirs.length}</span></>}
+              aside={<Link to="../commitments?side=theirs" className="text-[0.8125rem] text-ink-muted hover:text-ink">All</Link>}
+            >
+              <ul className="divide-y divide-line">
+                {theirs.map((c) => (
+                  <li key={c.id} className="py-2 text-sm">
+                    <p className="font-medium">{c.summary}</p>
+                    <p className={cx(ui.hint, "flex flex-wrap gap-x-1.5")}>
+                      {c.madeBy && <span>{c.madeBy}</span>}
+                      {c.dueDate && (
+                        <span>
+                          · <DueDate commitment={c} />
+                        </span>
+                      )}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </SideSection>
+          )}
           <SideSection
             title={<>Contacts <span className="font-normal normal-case">{contacts.length}</span></>}
             aside={manage && <button className="text-[0.8125rem] font-medium text-brand hover:text-brand-hover" onClick={() => setDialog({ kind: "contact" })}>Add</button>}

@@ -19,7 +19,15 @@ describe("matchItem", () => {
     expect(r).toEqual({ status: "matched", accountId: "acc-nw", reason: "email domain northwind.com" });
   });
 
-  it("matches subdomains to the parent domain", () => {
+  it("routes a file by the people and domains it's shared with", () => {
+    const file = (metadata: Record<string, unknown>): MatchInput => ({ ...email(metadata), provider: "google" });
+    expect(matchItem(file({ modifiedBy: "sara@acme.com", sharedWith: ["lina@northwind.com"] }), ctx())).toMatchObject({ status: "matched", accountId: "acc-nw" });
+    expect(matchItem(file({ sharedWith: [], sharedWithDomains: ["initech.io"] }), ctx())).toEqual({ status: "matched", accountId: "acc-in", reason: "shared with initech.io" });
+    // Shared only inside the company: not a client's file.
+    expect(matchItem(file({ sharedWith: ["ops@acme.com"], sharedWithDomains: ["acme.com"] }), ctx()).status).toBe("unmatched");
+  });
+
+    it("matches subdomains to the parent domain", () => {
     expect(matchItem(email({ from: "bot@mail.northwind.com" }), ctx()).accountId).toBe("acc-nw");
   });
 

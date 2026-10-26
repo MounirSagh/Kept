@@ -82,7 +82,10 @@ describe("Google Workspace", () => {
     // The calendar backfill hands over to updates in the same run, which picks up c2.
     expect(first.items.map((i) => i.externalId)).toEqual(["gmail:g1", "gmail:g3", "gcal:c1", "gcal:c2", "gdrive:doc1", "gdrive:pdf1"]);
     expect(first.items[0]).toMatchObject({ title: "Renewal", contentText: "plain Renewal", metadata: { to: ["a@x.com", "b@y.com"] } });
-    expect(first.items.find((i) => i.externalId === "gdrive:doc1")!.contentText).toBe("Statement of work: SSO by Nov 1");
+    // Drive files are reported, not read: they're downloaded later, only if routed to a client.
+    const doc = first.items.find((i) => i.externalId === "gdrive:doc1")!;
+    expect(doc.contentText).toBeUndefined();
+    expect(doc.metadata).toMatchObject({ file: { kind: "gdrive", fileId: "doc1" }, mimeType: "application/vnd.google-apps.document", contentStatus: "pending" });
     expect(first.state.gmail?.cursor).toEqual({ phase: "history", historyId: "150" });
 
     expect(first.state.calendar?.cursor).toEqual({ phase: "updates", watermark: "2026-10-10T05:00:00Z" });
@@ -99,7 +102,7 @@ describe("Slack", () => {
     const routes = [
       { match: ["conversations.list"], json: { ok: true, channels: [{ id: "C1", name: "northwind", is_member: true }, { id: "C2", name: "random", is_member: false }] } },
       { match: ["conversations.history", "channel=C1", "oldest=1783814400"], json: { ok: true, messages: [{ ts: "1791000000.000200", user: "U1", text: "<@U2> we'll have the fix out Friday" }, { ts: "1791000000.000100", subtype: "channel_join", text: "joined" }], response_metadata: { next_cursor: "p2" } }, times: 1 },
-      { match: ["users.info", "user=U1"], json: { ok: true, user: { name: "sara", profile: { real_name: "Sara Lee" } } } },
+      { match: ["users.info", "user=U1"], json: { ok: true, user: { name: "sara", profile: { real_name: "Sara Lee", email: "Sara@Northwind.com" } } } },
       { match: ["users.info", "user=U2"], json: { ok: true, user: { name: "omar", real_name: "Omar Haddad" } } },
       { match: ["conversations.history", "cursor=p2"], json: { ok: true, messages: [{ ts: "1790900000.000100", user: "U2", text: "&gt; Can you confirm the date? Q&amp;A in <https://kept.app/n|the doc>" }] } },
       { match: ["conversations.history", "oldest=1791000000.000200"], json: { ok: true, messages: [] } },
@@ -111,6 +114,8 @@ describe("Slack", () => {
     expect(first.items[0]!.container).toEqual({ id: "C1", label: "#northwind" });
     // Ids become names, in the author and in mentions; each person is looked up once.
     expect(first.items.map((i) => i.author)).toEqual(["Sara Lee", "Omar Haddad"]);
+    // The author's email routes the message (a client contact in a Slack Connect channel); none for Omar.
+    expect(first.items.map((i) => i.metadata?.authorEmail)).toEqual(["sara@northwind.com", undefined]);
     expect(first.items[0]!.contentText).toBe("@Omar Haddad we'll have the fix out Friday");
     expect(first.items[1]!.contentText).toBe("> Can you confirm the date? Q&A in the doc (https://kept.app/n)");
     expect(f1.calls.filter((c) => c.url.includes("users.info"))).toHaveLength(2);
@@ -118,6 +123,48 @@ describe("Slack", () => {
     expect((await sync(PROVIDERS.slack, f2.fetch, first.state)).items).toEqual([]);
     expect(f2.calls.some((c) => c.url.includes("oldest=1791000000.000200"))).toBe(true);
     expect(f2.calls.some((c) => c.url.includes("users.info"))).toBe(false);
+  });
+
+  it("reads thread replies with their parent as context, and keeps following active threads", async () => {
+    // ctx.now is 2026-10-10 (1791590400); the thread's last reply was a week earlier.
+    const parent = { ts: "1791000000.000100", user: "U1", text: "Can you send the usage export by Friday?", reply_count: 2, latest_reply: "1791000300.000100" };
+    const reply = (ts: string, text: string) => ({ ts, user: "U2", text, thread_ts: parent.ts });
+    const routes = [
+      { match: ["users.info", "user=U1"], json: { ok: true, user: { real_name: "Lina Park" } } },
+      { match: ["users.info", "user=U2"], json: { ok: true, user: { real_name: "Dana Wells" } } },
+      { match: ["conversations.list"], json: { ok: true, channels: [{ id: "C1", name: "northwind", is_member: true }] } },
+      { match: ["conversations.history", "oldest=1783814400"], json: { ok: true, messages: [parent] } },
+      { match: ["conversations.history", "oldest=1791000000.000100"], json: { ok: true, messages: [] } },
+      { match: ["conversations.replies", "ts=1791000000.000100", "oldest=1791000000.000100"], json: { ok: true, messages: [parent, reply("1791000200.000100", "Yes, I'll send it Friday."), reply("1791000300.000100", "Sent!")] } },
+      { match: ["conversations.replies", "oldest=1791000300.000100"], json: { ok: true, messages: [parent, reply("1791000400.000100", "Lina confirmed she got it.")] } },
+    ];
+    const first = await sync(PROVIDERS.slack, fakeFetch(routes).fetch);
+    expect(first.items.map((i) => i.externalId)).toEqual(["slack:C1:1791000000.000100", "slack:C1:1791000200.000100", "slack:C1:1791000300.000100"]);
+    const sent = first.items[2]!;
+    expect(sent.title).toBe("#northwind (thread)");
+    expect(sent.author).toBe("Dana Wells");
+    expect(sent.contentText).toBe('In reply to: "Can you send the usage export by Friday?"\n\nSent!');
+
+    // No new top-level message, but the followed thread got a reply.
+    const second = await sync(PROVIDERS.slack, fakeFetch(routes).fetch, first.state);
+    expect(second.items.map((i) => i.contentText)).toEqual(['In reply to: "Can you send the usage export by Friday?"\n\nLina confirmed she got it.']);
+  });
+
+  it("reads an old thread once, then stops following it", async () => {
+    const old = { ts: "1780000000.000100", user: "U1", text: "Old question", reply_count: 1, latest_reply: "1780000100.000100" };
+    const routes = [
+      { match: ["users.info"], json: { ok: true, user: { real_name: "Someone" } } },
+      { match: ["conversations.list"], json: { ok: true, channels: [{ id: "C1", name: "northwind", is_member: true }] } },
+      // Later syncs ask only for messages after the last one seen, which leaves out the old parent.
+      { match: ["conversations.history", "oldest=1780000000.000100"], json: { ok: true, messages: [] } },
+      { match: ["conversations.history"], json: { ok: true, messages: [old] } },
+      { match: ["conversations.replies"], json: { ok: true, messages: [old, { ts: "1780000100.000100", user: "U1", text: "Old answer", thread_ts: old.ts }] } },
+    ];
+    const first = await sync(PROVIDERS.slack, fakeFetch(routes).fetch);
+    expect(first.items.map((i) => i.contentText)).toContain('In reply to: "Old question"\n\nOld answer');
+    const f2 = fakeFetch(routes);
+    await sync(PROVIDERS.slack, f2.fetch, first.state);
+    expect(f2.calls.some((c) => c.url.includes("conversations.replies"))).toBe(false);
   });
 
   it("surfaces Slack's ok:false errors", async () => {

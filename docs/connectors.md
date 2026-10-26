@@ -21,18 +21,39 @@ would have to reconnect.
 
 | Provider | Who connects | What Kept reads |
 | --- | --- | --- |
-| Microsoft 365 | Each member, their own account | Outlook inbox and sent mail, calendar, OneDrive file metadata, Teams chats |
-| Google Workspace | Each member, their own account | Gmail, primary calendar, Drive (Google Docs as text, other files as metadata) |
-| Slack | An owner, once | Messages in channels the Kept app is added to |
-| Linear | An owner, once | Issues and comments |
+| Microsoft 365 | Each member, their own account | Outlook inbox and sent mail with attachments, calendar, OneDrive files, Teams chats and files shared in them, SharePoint and OneDrive links |
+| Google Workspace | Each member, their own account | Gmail with attachments, primary calendar and files attached to events, Drive files, Drive links |
+| Slack | An owner, once | Messages, thread replies and shared files in channels the Kept app is added to |
+| Linear | An owner, once | Issues and comments; files issues a person approved |
 | Notion | An owner, once | Pages shared with Kept in Notion's consent screen |
-| HubSpot | An owner, once | Companies, contacts, deals, notes |
+| HubSpot | An owner, once | Companies, contacts, deals, notes; adds tasks a person approved |
 
 - The first sync reads the last 90 days; after that a sync runs every 15 minutes and only fetches
   what changed. Owners and account holders can trigger "Sync now".
 - Items from a member's own account are private to them until matched to a client account.
 - If a provider revokes access, the connection shows "Needs reconnecting" and stops syncing.
 - Disconnecting deletes everything Kept synced from that account.
+
+### Documents
+
+Files are synced as names only. Kept downloads and reads a file **only once it is routed to a
+client**, so files about nobody in particular are never read. A file reaches a client when:
+
+- it's attached to an email, calendar event or Slack message that routes to the client;
+- it's shared in Drive or OneDrive with someone at the client (their address or their domain);
+- its folder is routed to the client on the Routing page, by an owner or automatically (Drive and
+  OneDrive folders appear there);
+- a message routed to the client links to it (Google Docs, Sheets, Slides and Drive links; SharePoint,
+  OneDrive and 1drv.ms links). The file is read with the connection of whoever posted the link if
+  they connected the same tool, otherwise with the first member who did.
+
+Kept reads PDF, Word, Excel, CSV, PowerPoint, Google Docs, Sheets and Slides, text and HTML.
+Scanned PDFs (up to 20 pages, 10 MB) and images are read with OpenAI's vision model. Files over
+15 MB, tiny attachments (signature logos, under 2 KB, or images under 100 KB) and other formats are
+skipped. Each file's status is shown under **Documents** on the company page.
+
+Contracts get one more read: when one states a renewal date or a yearly value that differs from
+the company's, Kept suggests the change as a **Company update** on the Approvals page.
 
 ## Microsoft 365
 
@@ -41,8 +62,18 @@ would have to reconnect.
 3. Redirect URI: platform **Web**, value `<WEB_ORIGIN>/oauth/callback`.
 4. Certificates & secrets → New client secret. Copy the **Value** into `MICROSOFT_CLIENT_SECRET`,
    and the Application (client) ID into `MICROSOFT_CLIENT_ID`.
-5. API permissions → Microsoft Graph → **Delegated**: `User.Read`, `Mail.Read`, `Calendars.Read`,
-   `Files.Read`, `Chat.Read`, `offline_access`, `openid`, `email`.
+5. API permissions → Microsoft Graph → **Delegated**: `User.Read`, `Mail.Read`, `Mail.Send`,
+   `Calendars.Read`, `Files.Read.All`, `Sites.Read.All`, `Chat.Read`, `offline_access`, `openid`,
+   `email`.
+
+`Files.Read.All` and `Sites.Read.All` let Kept open files shared with the member and SharePoint
+links posted in client conversations, not just files in their own OneDrive. Accounts connected
+before these were added need to disconnect and connect again (until then such files show
+"No access").
+
+`Mail.Send` lets Kept send the emails a person approves on the Approvals page, from their own
+mailbox. Nothing is sent without that approval. Accounts connected before `Mail.Send` was added
+need to disconnect and connect again to grant it.
 
 Some organizations require an admin to approve apps before members can connect. Teams channel
 messages need admin-consented permissions and aren't read yet.
@@ -51,15 +82,20 @@ messages need admin-consented permissions and aren't read yet.
 
 1. Google Cloud console → create a project → enable the **Gmail API**, **Google Calendar API**
    and **Google Drive API**.
-2. OAuth consent screen: add the scopes `gmail.readonly`, `calendar.readonly`, `drive.readonly`,
-   plus `openid` and `email`. While in **Testing**, add each tester's address as a test user
-   (up to 100).
+2. OAuth consent screen (**Google Auth Platform → Data access**): add the scopes `gmail.readonly`,
+   `gmail.send`, `calendar.readonly`, `drive.readonly`, plus `openid` and `email`. While in
+   **Testing**, add each tester's address under **Audience → Test users** (up to 100).
 3. Credentials → Create credentials → OAuth client ID → **Web application**, authorized redirect
    URI `<WEB_ORIGIN>/oauth/callback`.
 
-`gmail.readonly` and `drive.readonly` are **restricted scopes**. Publishing the app to any Google
-user requires Google's verification plus an annual third-party security assessment, which takes
-weeks. Start it well before launch.
+`gmail.send` lets Kept send the emails a person approves on the Approvals page, from their own
+Gmail. Nothing is sent without that approval. Accounts connected before `gmail.send` was added
+need to disconnect and connect again to grant it.
+
+`gmail.readonly` and `drive.readonly` are **restricted scopes** and `gmail.send` is **sensitive**.
+Publishing the app to any Google user requires Google's verification plus an annual third-party
+security assessment (CASA), which takes weeks. Start it well before launch; testing mode works
+meanwhile.
 
 ## Slack
 
@@ -67,14 +103,24 @@ weeks. Start it well before launch.
 2. OAuth & Permissions → Redirect URLs: add `<WEB_ORIGIN>/oauth/callback` (Slack requires HTTPS:
    use a tunnel locally).
 3. Bot Token Scopes: `channels:read`, `channels:history`, `groups:read`, `groups:history`,
-   `users:read`, `team:read`.
+   `users:read`, `users:read.email`, `team:read`, `files:read`.
 4. Basic Information → App Credentials: copy Client ID and Client Secret.
 5. After connecting, invite the app to each channel Kept should read (`/invite @YourApp`).
+
+`files:read` lets Kept read files shared in those channels. `users:read.email` gives Kept each
+message author's email, so messages from a client's people (in a Slack Connect channel) route to
+that client by themselves, and a channel where they talk can be routed automatically. A workspace
+connected before either was added needs the app reinstalled (Slack shows "Reinstall to Workspace" after the scope is added),
+then a reconnect from the Integrations page.
 
 ## Linear
 
 1. Linear → Settings → API → OAuth applications → New.
 2. Callback URL `<WEB_ORIGIN>/oauth/callback`. Copy the client id and secret.
+
+Kept requests `read` and `issues:create`. `issues:create` files the issues a person approves on the
+Approvals page (in the team they pick, as the member who connected Linear); Kept never edits or
+closes issues. A workspace connected before it was added needs to reconnect.
 
 ## Notion
 
@@ -92,8 +138,11 @@ HubSpot no longer offers legacy apps on new developer accounts; Kept's app is a
 3. Connect a regular HubSpot portal or a free test account (Development → Testing); the
    developer account itself can't install apps.
 
-The app requests `oauth`, `crm.objects.companies.read`, `crm.objects.contacts.read` and
-`crm.objects.deals.read`. Keep `hubspot/src/app/app-hsmeta.json` and
+The app requests `oauth`, `crm.objects.companies.read`, `crm.objects.contacts.read`,
+`crm.objects.deals.read`, `crm.objects.contacts.write` and `crm.objects.owners.read`. The last two
+let Kept add the tasks a person approves to a company's record (HubSpot requires the contacts write
+scope for tasks) and assign them to the account owner's HubSpot user. Kept doesn't change contacts,
+companies or deals. After adding them, run `hs project upload` and reconnect HubSpot. Keep `hubspot/src/app/app-hsmeta.json` and
 `packages/connectors/src/providers/hubspot.ts` in sync: HubSpot rejects a connection whose
 requested scopes differ from the app's required scopes. If notes fail to sync with a scope
 error, add the scope it names to both.

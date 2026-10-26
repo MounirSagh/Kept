@@ -1,6 +1,7 @@
 // HubSpot, connected once per portal: companies, contacts, deals and notes via the CRM
 // search API, each followed by its last-modified date.
 
+import type { ApiClient } from "../http.js";
 import { standardToken } from "../oauth.js";
 import { clip, date, htmlToText } from "../text.js";
 import type { ProviderDefinition, SourceItemInput, SourceKind, Stream } from "../types.js";
@@ -110,6 +111,39 @@ function objectStream(spec: ObjectSpec): Stream {
   };
 }
 
+/** HubSpot's built-in association type for task → company. */
+const TASK_TO_COMPANY = 192;
+
+/**
+ * Creates a task on a company, assigned to the HubSpot user with this email when there is one.
+ * The client must not retry (a retry could create it twice).
+ */
+export async function createHubspotTask(
+  client: ApiClient,
+  task: { companyId: string; subject: string; body: string; dueDate: string; ownerEmail: string | null },
+): Promise<{ id: string; ownerAssigned: boolean }> {
+  let ownerId: string | null = null;
+  if (task.ownerEmail) {
+    const owners = await client.json<{ results: { id: string }[] }>(`/crm/v3/owners?email=${encodeURIComponent(task.ownerEmail)}&limit=1`);
+    ownerId = owners.results[0]?.id ?? null;
+  }
+  const res = await client.json<{ id: string }>("/crm/v3/objects/tasks", {
+    method: "POST",
+    body: {
+      properties: {
+        hs_task_subject: task.subject,
+        hs_task_body: task.body,
+        hs_timestamp: new Date(`${task.dueDate}T09:00:00Z`).toISOString(),
+        hs_task_status: "NOT_STARTED",
+        hs_task_type: "TODO",
+        ...(ownerId ? { hubspot_owner_id: ownerId } : {}),
+      },
+      associations: [{ to: { id: task.companyId }, types: [{ associationCategory: "HUBSPOT_DEFINED", associationTypeId: TASK_TO_COMPANY }] }],
+    },
+  });
+  return { id: res.id, ownerAssigned: ownerId !== null };
+}
+
 export const hubspot: ProviderDefinition = {
   id: "hubspot",
   name: "HubSpot",
@@ -118,15 +152,20 @@ export const hubspot: ProviderDefinition = {
   oauth: {
     authorizeUrl: "https://app.hubspot.com/oauth/authorize",
     tokenUrl: "https://api.hubapi.com/oauth/v1/token",
-    scopes: ["oauth", "crm.objects.companies.read", "crm.objects.contacts.read", "crm.objects.deals.read"],
+    // contacts.write is what HubSpot requires to create tasks; owners.read assigns them to the right person.
+    scopes: [
+      "oauth", "crm.objects.companies.read", "crm.objects.contacts.read", "crm.objects.deals.read",
+      "crm.objects.contacts.write", "crm.objects.owners.read",
+    ],
     clientAuth: "body",
     bodyFormat: "form",
   },
   apiBase: "https://api.hubapi.com",
   parseToken: (raw) => standardToken(raw),
   async identify(client, raw) {
-    const info = await client.json<{ hub_id: number; hub_domain?: string }>(`/oauth/v1/access-tokens/${String(raw.access_token)}`);
-    return { externalAccountId: String(info.hub_id), label: info.hub_domain ?? `HubSpot ${info.hub_id}` };
+    // HubSpot's token response doesn't list scopes; the token info does.
+    const info = await client.json<{ hub_id: number; hub_domain?: string; scopes?: string[] }>(`/oauth/v1/access-tokens/${String(raw.access_token)}`);
+    return { externalAccountId: String(info.hub_id), label: info.hub_domain ?? `HubSpot ${info.hub_id}`, scopes: info.scopes };
   },
   streams: SPECS.map(objectStream),
 };

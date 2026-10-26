@@ -90,6 +90,29 @@ const issuesStream: Stream = {
   },
 };
 
+/**
+ * Files an issue in the team with this key. The client must not retry (a retry could file it twice).
+ */
+export async function createLinearIssue(
+  client: ApiClient,
+  issue: { teamKey: string; title: string; description: string },
+): Promise<{ identifier: string; url: string }> {
+  const { teams } = await graphql<{ teams: { nodes: { id: string }[] } }>(
+    client,
+    `query Team($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { id } } }`,
+    { key: issue.teamKey },
+  );
+  const teamId = teams.nodes[0]?.id;
+  if (!teamId) throw new Error(`No Linear team with the key ${issue.teamKey}`);
+  const { issueCreate } = await graphql<{ issueCreate: { success: boolean; issue?: { identifier: string; url: string } } }>(
+    client,
+    `mutation Create($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { identifier url } } }`,
+    { input: { teamId, title: issue.title, description: issue.description } },
+  );
+  if (!issueCreate.success || !issueCreate.issue) throw new Error("Linear didn't create the issue");
+  return issueCreate.issue;
+}
+
 export const linear: ProviderDefinition = {
   id: "linear",
   name: "Linear",
@@ -98,7 +121,8 @@ export const linear: ProviderDefinition = {
   oauth: {
     authorizeUrl: "https://linear.app/oauth/authorize",
     tokenUrl: "https://api.linear.app/oauth/token",
-    scopes: ["read"],
+    // issues:create files the issues a person approved in Kept; nothing else is written.
+    scopes: ["read", "issues:create"],
     scopeSeparator: ",",
     extraAuthorizeParams: { prompt: "consent" },
     clientAuth: "body",

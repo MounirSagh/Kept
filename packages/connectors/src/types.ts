@@ -67,6 +67,8 @@ export interface Identity {
   externalAccountId: string;
   /** Human-readable: an email address or a workspace name. */
   label: string;
+  /** Granted scopes, for providers whose token response doesn't list them. */
+  scopes?: string[];
 }
 
 export interface OAuthSpec {

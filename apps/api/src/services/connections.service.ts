@@ -121,7 +121,7 @@ export async function completeAuthorization(user: User, code: string, stateToken
     refreshTokenEnc: tokens.refreshToken ? encryptToken(tokens.refreshToken, key) : null,
     tokenKeyVersion: TOKEN_KEY_VERSION,
     tokenExpiresAt: tokens.expiresAt ?? null,
-    scopes: tokens.scopes,
+    scopes: tokens.scopes.length ? tokens.scopes : (identity.scopes ?? []),
     status: "active" as const,
     lastError: null,
     connectedById: user.id,

@@ -70,7 +70,7 @@ describe("oauth", () => {
 
   it("builds provider-specific authorize URLs", () => {
     const slack = new URL(authorizeUrl(PROVIDERS.slack, app, "https://kept.test/cb", "st"));
-    expect(slack.searchParams.get("scope")).toBe("channels:read,channels:history,groups:read,groups:history,users:read,team:read");
+    expect(slack.searchParams.get("scope")).toBe("channels:read,channels:history,groups:read,groups:history,users:read,users:read.email,team:read,files:read");
     const google = new URL(authorizeUrl(PROVIDERS.google, app, "https://kept.test/cb", "st"));
     expect(google.searchParams.get("access_type")).toBe("offline");
     expect(google.searchParams.get("state")).toBe("st");

@@ -39,6 +39,15 @@ export interface AccountContext {
   pendingActions: string[];
   /** What Kept has learned from past decisions (H-MEM). */
   memories: string[];
+  /** What the World Model knows about the account over time: term changes, track record, people who moved. */
+  history: string[];
+  /** Tools Kept may act in for this account, beyond email, reminders and alerts. */
+  tools: {
+    /** Linear teams an issue can be filed in. Empty: no Linear issues. */
+    linearTeams: { key: string; name: string }[];
+    /** Whether a task can be added to the company's HubSpot record. */
+    crmTasks: boolean;
+  };
 }
 
 export interface SourceDoc {
@@ -97,7 +106,9 @@ export interface FlagProposal {
 export type ActionProposal =
   | { type: "send_email"; flag: number | null; rationale: string; to: string[]; subject: string; body: string }
   | { type: "schedule_reminder"; flag: number | null; rationale: string; title: string; remindOn: string }
-  | { type: "internal_alert"; flag: number | null; rationale: string; message: string };
+  | { type: "internal_alert"; flag: number | null; rationale: string; message: string }
+  | { type: "create_ticket"; flag: number | null; rationale: string; teamKey: string; title: string; description: string }
+  | { type: "update_crm"; flag: number | null; rationale: string; subject: string; body: string; dueDate: string };
 
 export interface Finding {
   questionId: string;
@@ -184,9 +195,23 @@ function describeContext(ctx: AccountContext, refs: Refs, opts: { full: boolean 
     `Actions waiting for a person to decide:\n${ctx.pendingActions.map((a) => `- ${a}`).join("\n") || "(none)"}`,
     "",
     `Learned from past decisions:\n${ctx.memories.map((m) => `- ${m}`).join("\n") || "(none)"}`,
+    "",
+    `History of the account (World Model):\n${ctx.history.map((h) => `- ${h}`).join("\n") || "(nothing beyond the above)"}`,
   ]
     .filter((line) => line !== null)
     .join("\n");
+}
+
+/** The tool actions available for this account, for the advisor's instructions. */
+function describeTools(ctx: AccountContext): string {
+  const parts: string[] = [];
+  if (ctx.tools.linearTeams.length > 0) {
+    parts.push(
+      ` create_ticket files a Linear issue for work the company promised and nobody is tracking (teams: ${ctx.tools.linearTeams.map((t) => `${t.key} = ${t.name}`).join(", ")}); never for work already tracked in a Linear issue.`,
+    );
+  }
+  if (ctx.tools.crmTasks) parts.push(" update_crm adds a task for the account owner on the company's HubSpot record, with a due date, when the follow-up belongs in the CRM.");
+  return parts.join("");
 }
 
 /* Schemas ------------------------------------------------------------------------------------ */
@@ -243,7 +268,7 @@ const advisorSchema = z.object({
   ),
   actions: z.array(
     z.object({
-      type: z.enum(["send_email", "schedule_reminder", "internal_alert"]),
+      type: z.enum(["send_email", "schedule_reminder", "internal_alert", "create_ticket", "update_crm"]),
       flag: z.number().nullable().describe("Index of the flag in your flags list this action addresses."),
       rationale: z.string(),
       emailTo: z.array(z.string()).describe("send_email only: recipients, from the account's contacts."),
@@ -251,6 +276,10 @@ const advisorSchema = z.object({
       emailBody: z.string().nullable().describe("send_email only: plain text, ready to send, signed off."),
       remindOn: z.string().nullable().describe("schedule_reminder only: YYYY-MM-DD."),
       message: z.string().nullable().describe("schedule_reminder title or internal_alert message."),
+      teamKey: z.string().nullable().describe("create_ticket only: the key of one of the Linear teams listed."),
+      taskTitle: z.string().nullable().describe("create_ticket: issue title. update_crm: task subject."),
+      taskBody: z.string().nullable().describe("create_ticket: issue description (what was promised, to whom, by when, the evidence). update_crm: task notes."),
+      dueDate: z.string().nullable().describe("update_crm only: YYYY-MM-DD."),
     }),
   ),
 });
@@ -466,7 +495,7 @@ Flags are for what the commitments list can't show by itself. That list already 
 - Customer signals (a competitor, frustration, a threat to leave) are flags on their own.
 Only flag what the findings show. Don't repeat what is already flagged. Evidence excerpts must be copied from the citations.
 Raise one flag per underlying issue. A promise that is late, contradicted by an update and blocked is one flag: pick the kind that fits best and cover the rest in the explanation.
-Actions: send_email drafts a message to the customer from the account owner (only to the contacts listed; plain text, warm, specific, no promises the team hasn't made; never mention internal notes, systems, tools, Slack or tickets, or that records disagree: write only what the account owner would say to the customer${ctx.org.emailSignature ? "; end with the signature given" : ""}). schedule_reminder sets a reminder for the account owner on a date. internal_alert tells the account team something now. Propose few actions, only useful ones, and none that repeats an action already waiting for a decision.`,
+Actions: send_email drafts a message to the customer from the account owner (only to the contacts listed; plain text, warm, specific, no promises the team hasn't made; never mention internal notes, systems, tools, Slack or tickets, or that records disagree: write only what the account owner would say to the customer${ctx.org.emailSignature ? "; end with the signature given" : ""}). schedule_reminder sets a reminder for the account owner on a date. internal_alert tells the account team something now.${describeTools(ctx)} Propose few actions, only useful ones, and none that repeats an action already waiting for a decision.`,
         user: [
           describeContext(ctx, refs, { full: false }),
           "",
@@ -614,6 +643,15 @@ function toProposals(advice: z.infer<typeof advisorSchema>, refs: Refs, ctx: Acc
       const remindOn = isoDate(a.remindOn);
       if (!remindOn || remindOn < ctx.today || !a.message?.trim()) continue;
       actions.push({ type: "schedule_reminder", flag, rationale, title: a.message.trim(), remindOn });
+    } else if (a.type === "create_ticket") {
+      // Only into a team that exists; the issue must say what to do.
+      const team = ctx.tools.linearTeams.find((t) => t.key.toLowerCase() === a.teamKey?.trim().toLowerCase());
+      if (!team || !a.taskTitle?.trim() || !a.taskBody?.trim()) continue;
+      actions.push({ type: "create_ticket", flag, rationale, teamKey: team.key, title: a.taskTitle.trim().slice(0, 250), description: a.taskBody.trim() });
+    } else if (a.type === "update_crm") {
+      const dueDate = isoDate(a.dueDate);
+      if (!ctx.tools.crmTasks || !dueDate || dueDate < ctx.today || !a.taskTitle?.trim()) continue;
+      actions.push({ type: "update_crm", flag, rationale, subject: a.taskTitle.trim().slice(0, 250), body: a.taskBody?.trim() ?? "", dueDate });
     } else {
       if (!a.message?.trim()) continue;
       actions.push({ type: "internal_alert", flag, rationale, message: a.message.trim() });

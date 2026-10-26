@@ -17,6 +17,7 @@
     "@kept/agents": "workspace:*",
     "@kept/connectors": "workspace:*",
     "@kept/db": "workspace:*",
+    "@kept/documents": "workspace:*",
     "@kept/hmem": "workspace:*",
     "@kept/llm": "workspace:*",
     "@kept/shared": "workspace:*",

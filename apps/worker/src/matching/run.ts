@@ -1,7 +1,9 @@
 import type { Job } from "bullmq";
-import type { PrismaClient } from "@kept/db";
+import type { Prisma, PrismaClient } from "@kept/db";
 import type { Queue } from "bullmq";
 import type { ExtractJobData, MatchJobData } from "@kept/shared";
+import { autoRoute } from "./auto.js";
+import { linkFiles } from "./links.js";
 import { FREE_MAIL_DOMAINS, matchItem, normalizeDomain, type MatchContext, type MatchResult } from "./match.js";
 
 const BATCH = 500;
@@ -121,7 +123,7 @@ export async function loadContext(prisma: PrismaClient, orgId: string): Promise<
   const [accounts, contacts, mappings, members] = await Promise.all([
     prisma.account.findMany({ where: { orgId, deletedAt: null }, select: { id: true, domain: true, crmExternalId: true } }),
     prisma.contact.findMany({ where: { orgId, deletedAt: null, accountId: { not: null }, email: { not: null } }, select: { email: true, accountId: true } }),
-    prisma.sourceMapping.findMany({ where: { orgId }, select: { connectionId: true, containerId: true, accountId: true, ignored: true, containerLabel: true } }),
+    prisma.sourceMapping.findMany({ where: { orgId }, select: { connectionId: true, containerId: true, accountId: true, ignored: true, containerLabel: true, origin: true } }),
     prisma.membership.findMany({ where: { orgId }, select: { user: { select: { email: true } } } }),
   ]);
 
@@ -147,21 +149,48 @@ export async function loadContext(prisma: PrismaClient, orgId: string): Promise<
     accountsByCrmId,
     contactAccounts: new Map(contacts.map((c) => [c.email!.toLowerCase(), c.accountId!])),
     mappings: new Map(
-      mappings.map((m) => [`${m.connectionId}:${m.containerId}`, { accountId: m.accountId, ignored: m.ignored, label: m.containerLabel }]),
+      mappings.map((m) => [`${m.connectionId}:${m.containerId}`, { accountId: m.accountId, ignored: m.ignored, label: m.containerLabel, auto: m.origin === "auto" }]),
     ),
   };
 }
 
-/** Matches pending items, or every item when rules changed (`all`). Writes only what changed. */
+/**
+ * Matches pending items, or every item when rules changed (`all`). Writes only what changed.
+ * Containers that the matched items (or their names) tie to one client are then routed to it
+ * automatically, and their items matched again.
+ */
 export async function matchOrg(prisma: PrismaClient, orgId: string, all: boolean) {
   const crm = await importCrm(prisma, orgId);
-  const ctx = await loadContext(prisma, orgId);
   const counts: Record<string, number> = {};
-  let cursor: string | undefined;
+  const evaluated = new Set<string>();
+  await matchPass(prisma, orgId, await loadContext(prisma, orgId), all ? {} : { matchStatus: "pending" }, counts, evaluated);
 
+  const routed = await autoRoute(prisma, orgId);
+  let rematched = 0;
+  if (routed.length > 0) {
+    // Second pass over the newly routed containers only; counted apart, since these items were counted once already.
+    const again: Record<string, number> = {};
+    await matchPass(prisma, orgId, await loadContext(prisma, orgId), { OR: routed.map((r) => ({ connectionId: r.connectionId, containerId: r.containerId })) }, again, evaluated);
+    rematched = Object.values(again).reduce((s, n) => s + n, 0);
+  }
+
+  // Files linked from client conversations follow them (after the rules, so links see final statuses).
+  const linkedFiles = await linkFiles(prisma, orgId, [...evaluated]);
+  return { ...counts, autoRouted: routed.length, rematched, linkedFiles, importedAccounts: crm.accounts, importedContacts: crm.contacts };
+}
+
+async function matchPass(
+  prisma: PrismaClient,
+  orgId: string,
+  ctx: MatchContext,
+  filter: Prisma.SourceItemWhereInput,
+  counts: Record<string, number>,
+  evaluated: Set<string>,
+) {
+  let cursor: string | undefined;
   for (;;) {
     const items = await prisma.sourceItem.findMany({
-      where: { orgId, ...(all ? {} : { matchStatus: "pending" }) },
+      where: { orgId, ...filter },
       select: {
         id: true, author: true, metadata: true, containerId: true, containerLabel: true,
         matchStatus: true, accountId: true, matchReason: true, connectionId: true,
@@ -173,6 +202,7 @@ export async function matchOrg(prisma: PrismaClient, orgId: string, all: boolean
     });
     if (items.length === 0) break;
     cursor = items.at(-1)!.id;
+    for (const i of items) evaluated.add(i.id);
 
     // Group identical outcomes so each group is one UPDATE.
     const groups = new Map<string, { result: MatchResult; ids: string[] }>();
@@ -203,7 +233,6 @@ export async function matchOrg(prisma: PrismaClient, orgId: string, all: boolean
     }
     if (items.length < BATCH) break;
   }
-  return { ...counts, importedAccounts: crm.accounts, importedContacts: crm.contacts };
 }
 
 /** After matching, newly matched items are read for commitments. */

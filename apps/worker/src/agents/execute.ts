@@ -1,8 +1,11 @@
 import type { Job, Queue } from "bullmq";
 import type { Prisma, PrismaClient } from "@kept/db";
-import { canSendMail, sendMail, type ConnectorConfig } from "@kept/connectors";
-import type { ActionJobData, AlertPayload, EmailJobData, ReminderPayload, SendEmailPayload } from "@kept/shared";
+import { canAct, canSendMail, createHubspotTask, createLinearIssue, sendMail, type ConnectorConfig } from "@kept/connectors";
+import type {
+  AccountUpdatePayload, ActionJobData, AlertPayload, CrmTaskPayload, EmailJobData, ReminderPayload, SendEmailPayload, TicketPayload,
+} from "@kept/shared";
 import { clientForConnection } from "../connection-client.js";
+import { openWorld, recordTermsChange } from "./world.js";
 
 interface Deps {
   prisma: PrismaClient;
@@ -42,8 +45,8 @@ export function createActionProcessor(deps: Deps) {
       where: { id: actionId },
       include: {
         org: { select: { slug: true } },
-        account: { select: { name: true, owner: { select: { id: true, email: true } } } },
-        decidedBy: { select: { id: true, email: true } },
+        account: { select: { name: true, crmExternalId: true, currency: true, owner: { select: { id: true, email: true } } } },
+        decidedBy: { select: { id: true, email: true, fullName: true } },
       },
     });
     const payload = (action.editedPayload ?? action.payload) as unknown;
@@ -76,6 +79,43 @@ export function createActionProcessor(deps: Deps) {
         const subject = action.account ? `Kept: ${action.account.name}` : "Kept alert";
         await deps.emailQueue.add("alert", { to: user.email, subject, ...notice(subject, [p.message], { href, label: "See flags" }) });
         result = { notified: user.email };
+      } else if (action.type === "update_account") {
+        // Terms read from a contract, applied once a person approved them.
+        const p = payload as AccountUpdatePayload;
+        if (!action.accountId) throw new Error("No company to update");
+        const data: Prisma.AccountUpdateInput = {};
+        if (p.renewalDate) data.renewalDate = new Date(`${p.renewalDate}T00:00:00Z`);
+        if (p.annualValue) {
+          data.annualValueCents = BigInt(Math.round(Number(p.annualValue) * 100));
+          if (p.currency) data.currency = p.currency;
+        }
+        await prisma.account.update({ where: { id: action.accountId }, data });
+        result = { updated: Object.keys(data) };
+        // The World Model keeps where the terms came from, for the agents' account history. Best effort.
+        try {
+          const approver = action.decidedBy?.fullName ?? action.decidedBy?.email ?? "someone";
+          await recordTermsChange(await openWorld(prisma, action.orgId), action.accountId, {
+            renewalDate: data.renewalDate as Date | undefined,
+            annualValueCents: data.annualValueCents as bigint | undefined,
+            currency: (data.currency as string | undefined) ?? action.account?.currency ?? null,
+            via: `from "${p.documentTitle}", approved by ${approver}`,
+            at: new Date(),
+          });
+        } catch (err) {
+          console.warn(`world model update for action ${action.id} failed: ${(err as Error).message}`);
+        }
+      } else if (action.type === "create_ticket") {
+        const p = payload as TicketPayload;
+        const { client } = await toolClient(deps, action.orgId, "linear");
+        const issue = await createLinearIssue(client, { teamKey: p.teamKey, title: p.title, description: p.description });
+        result = { issue: issue.identifier, url: issue.url };
+      } else if (action.type === "update_crm") {
+        const p = payload as CrmTaskPayload;
+        const companyId = action.account?.crmExternalId?.match(/^hubspot:(\d+)$/)?.[1];
+        if (!companyId) throw new Error("This company isn't linked to a HubSpot company");
+        const { client } = await toolClient(deps, action.orgId, "hubspot");
+        const task = await createHubspotTask(client, { companyId, subject: p.subject, body: p.body, dueDate: p.dueDate, ownerEmail: action.account?.owner?.email ?? null });
+        result = { taskId: task.id, ownerAssigned: task.ownerAssigned };
       } else {
         throw new Error(`Kept can't carry out ${action.type} actions`);
       }
@@ -91,6 +131,17 @@ export function createActionProcessor(deps: Deps) {
       return { failed: message };
     }
   };
+}
+
+/** The org's connection to a tool, allowed to act in it. Never retries: a retry could create the record twice. */
+async function toolClient(deps: Deps, orgId: string, provider: "linear" | "hubspot") {
+  if (!deps.config) throw new Error("TOKEN_ENCRYPTION_KEY is not set on the worker");
+  const name = provider === "linear" ? "Linear" : "HubSpot";
+  const connections = await deps.prisma.connection.findMany({ where: { orgId, provider, status: "active" }, orderBy: { updatedAt: "desc" } });
+  if (connections.length === 0) throw new Error(`Connect ${name} on the Integrations page, then approve again.`);
+  const connection = connections.find((c) => canAct(c.provider, c.scopes));
+  if (!connection) throw new Error(`Reconnect ${name} on the Integrations page to allow Kept to create records, then approve again.`);
+  return clientForConnection(deps.prisma, deps.config, connection, { maxRetries: 0 });
 }
 
 /** Sends from the approver's own Gmail or Outlook, so the customer gets it from the person they know. */

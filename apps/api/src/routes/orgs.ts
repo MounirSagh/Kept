@@ -55,6 +55,7 @@ orgsRouter.delete("/:orgId/accounts/:accountId", member, accounts.remove);
 // The people at each client; who may change them is checked in the service.
 orgsRouter.get("/:orgId/contacts", member, contacts.listPage);
 orgsRouter.get("/:orgId/accounts/:accountId/contacts", member, contacts.list);
+orgsRouter.get("/:orgId/accounts/:accountId/documents", member, accounts.documents);
 orgsRouter.post("/:orgId/accounts/:accountId/contacts", member, contacts.create);
 orgsRouter.patch("/:orgId/contacts/:contactId", member, contacts.update);
 orgsRouter.delete("/:orgId/contacts/:contactId", member, contacts.remove);
@@ -73,6 +74,7 @@ orgsRouter.get("/:orgId/actions", member, actions.list);
 orgsRouter.post("/:orgId/actions/:actionId/decision", member, actions.decide);
 
 orgsRouter.get("/:orgId/routing", member, routing.get);
+orgsRouter.put("/:orgId/routing/settings", member, routing.setSettings);
 orgsRouter.put("/:orgId/routing/:connectionId/:containerId", member, routing.setMapping);
 
 // Who may connect or manage depends on the provider and owner; checked in the service.

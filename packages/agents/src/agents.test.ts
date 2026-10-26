@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractFromItem, flagDedupeKey, runAccountAgents, scriptedChatModel, type AccountContext, type SourceDoc, type StepRecord } from "./index.js";
+import { documentSections, extractFromItem, flagDedupeKey, looksLikeContract, readContractTerms, runAccountAgents, scriptedChatModel, type AccountContext, type SourceDoc, type StepRecord } from "./index.js";
 import { cleanExcerpt, containsExcerpt, isoDate } from "./text.js";
 
 const EMAIL = `Hi Lina,
@@ -87,6 +87,8 @@ describe("runAccountAgents", () => {
     openFlags: [],
     pendingActions: [],
     memories: ["Halcyon prefers email over calls."],
+    history: ["Renewal date moved from 2026-12-01 to 2026-10-14 on 2026-09-02 (Halcyon order form.pdf, approved by Priya)."],
+    tools: { linearTeams: [{ key: "ENG", name: "Engineering" }], crmTasks: true },
   };
   // The ticket only turns up for the critic's follow-up search, not the planner's first one.
   const tools = {
@@ -115,10 +117,10 @@ describe("runAccountAgents", () => {
           { kind: "churn_signal", title: "No evidence at all", explanation: "x", severity: "low", confidence: 0.5, commitment: null, topic: "nothing", evidence: [{ ref: "S7", stance: "supports", excerpt: "whatever" }] },
         ],
         actions: [
-          { type: "send_email", flag: 0, rationale: "Set expectations", emailTo: ["lina@halcyon.com", "stranger@gmail.com"], emailSubject: "SSO fix timing", emailBody: "Hi Lina, ...", remindOn: null, message: null },
-          { type: "send_email", flag: 0, rationale: "Nobody valid", emailTo: ["stranger@gmail.com"], emailSubject: "x", emailBody: "y", remindOn: null, message: null },
-          { type: "schedule_reminder", flag: 0, rationale: "Check in", emailTo: [], emailSubject: null, emailBody: null, remindOn: "2026-10-13", message: "Check SSO status" },
-          { type: "schedule_reminder", flag: null, rationale: "In the past", emailTo: [], emailSubject: null, emailBody: null, remindOn: "2026-01-01", message: "Too late" },
+          { type: "send_email", flag: 0, rationale: "Set expectations", emailTo: ["lina@halcyon.com", "stranger@gmail.com"], emailSubject: "SSO fix timing", emailBody: "Hi Lina, ...", remindOn: null, message: null, teamKey: null, taskTitle: null, taskBody: null, dueDate: null },
+          { type: "send_email", flag: 0, rationale: "Nobody valid", emailTo: ["stranger@gmail.com"], emailSubject: "x", emailBody: "y", remindOn: null, message: null, teamKey: null, taskTitle: null, taskBody: null, dueDate: null },
+          { type: "schedule_reminder", flag: 0, rationale: "Check in", emailTo: [], emailSubject: null, emailBody: null, remindOn: "2026-10-13", message: "Check SSO status", teamKey: null, taskTitle: null, taskBody: null, dueDate: null },
+          { type: "schedule_reminder", flag: null, rationale: "In the past", emailTo: [], emailSubject: null, emailBody: null, remindOn: "2026-01-01", message: "Too late", teamKey: null, taskTitle: null, taskBody: null, dueDate: null },
         ],
       },
     });
@@ -152,7 +154,7 @@ describe("runAccountAgents", () => {
           { kind: "unkept_promise", title: "SSO missed", explanation: "a", severity: "high", confidence: 0.7, commitment: "C1", topic: "SSO", evidence: [ev('"No ETA yet, moving to next sprint."'), ev("No ETA yet, moving to next sprint.")] },
           { kind: "mismatch", title: "SSO promise vs status", explanation: "b", severity: "critical", confidence: 0.9, commitment: "C1", topic: "SSO status", evidence: [ev("moving to next sprint")] },
         ],
-        actions: [{ type: "internal_alert", flag: 1, rationale: "r", emailTo: [], emailSubject: null, emailBody: null, remindOn: null, message: "Tell the team" }],
+        actions: [{ type: "internal_alert", flag: 1, rationale: "r", emailTo: [], emailSubject: null, emailBody: null, remindOn: null, message: "Tell the team", teamKey: null, taskTitle: null, taskBody: null, dueDate: null }],
       },
     });
     const result = await runAccountAgents(ctx, { model, tools, onStep: () => undefined });
@@ -237,5 +239,115 @@ describe("runAccountAgents", () => {
     expect(calls.map((c) => c.name)).toEqual(["planner"]);
     expect(result.flags).toEqual([]);
     expect(steps).toHaveLength(1);
+  });
+});
+
+describe("documents", () => {
+  const page = (n: number, body: string) => `[Page ${n}]\n${body}`;
+  const long = Array.from({ length: 6 }, (_, i) => page(i + 1, `Clause ${i + 1}. ${"Lorem ipsum dolor sit amet. ".repeat(180)}`)).join("\n\n");
+
+  it("splits long documents into overlapping sections at page breaks", () => {
+    const sections = documentSections(long);
+    expect(sections.length).toBeGreaterThan(1);
+    for (const s of sections) expect(s.length).toBeLessThanOrEqual(12_000);
+    // Every section after the first starts near a page marker and overlaps the previous one.
+    expect(sections[1]).toContain("[Page ");
+    expect(sections.join("").length).toBeGreaterThan(long.length);
+    expect(documentSections("short text")).toEqual(["short text"]);
+  });
+
+  it("reads each section and keeps one copy of findings repeated in the overlap", async () => {
+    const promise = "Vendor will provide 99.9% monthly uptime.";
+    const doc = `${long}\n\n${page(7, promise)}`;
+    const { model, calls } = scriptedChatModel({
+      extract: (user: string) => ({
+        items: user.includes(promise)
+          ? [{ type: "commitment", summary: "99.9% uptime", madeBy: null, ownerEmail: null, dueDate: null, confidence: 0.9, excerpt: promise }]
+          : [],
+        updates: [],
+      }),
+    });
+    const result = await extractFromItem(model, {
+      org: { name: "Acme", internalDomains: ["acme.com"] },
+      account: { name: "Halcyon", domain: null },
+      item: { kind: "document", provider: "google", title: "MSA.pdf", author: null, occurredAt: new Date("2026-10-01T00:00:00Z"), container: null, content: doc },
+      known: [],
+    });
+    expect(calls.length).toBe(documentSections(doc).length);
+    expect(calls[0]!.system).toContain("This is a document");
+    expect(result.items.map((i) => i.summary)).toEqual(["99.9% uptime"]);
+  });
+});
+
+describe("readContractTerms", () => {
+  const CONTRACT = `Order Form\nCustomer: Halcyon Freight\nSubscription term: 12 months starting 2026-01-15, renewing automatically unless either party gives 60 days notice.\nFees: $48,000 per year.`;
+  const input = { title: "Halcyon order form.pdf", content: CONTRACT, accountName: "Halcyon Freight", today: "2026-10-25" };
+  const answer = { isContract: true, kind: "order_form", renewalDate: "2027-01-15", noticeDays: 60, annualValue: 48000, currency: "usd", excerpt: "Subscription term: 12 months starting 2026-01-15" };
+
+  it("returns checked terms from a contract", async () => {
+    expect(looksLikeContract(input.title, CONTRACT)).toBe(true);
+    const { model } = scriptedChatModel({ contract_terms: answer });
+    const { terms } = await readContractTerms(model, input);
+    expect(terms).toEqual({ kind: "order_form", renewalDate: "2027-01-15", noticeDays: 60, annualValue: 48000, currency: "USD", excerpt: answer.excerpt });
+  });
+
+  it("drops terms whose quote isn't in the document, and non-contracts", async () => {
+    const invented = scriptedChatModel({ contract_terms: { ...answer, excerpt: "Renews on 2027-01-15 for $48,000" } });
+    expect((await readContractTerms(invented.model, input)).terms).toBeNull();
+    const notOne = scriptedChatModel({ contract_terms: { ...answer, isContract: false, kind: "not_a_contract" } });
+    expect((await readContractTerms(notOne.model, input)).terms).toBeNull();
+    expect(looksLikeContract("Q3 roadmap.pptx", "Roadmap themes for the quarter")).toBe(false);
+  });
+});
+
+describe("tool actions", () => {
+  const base = {
+    today: "2026-10-11",
+    org: { name: "Acme", emailSignature: null },
+    account: { name: "Halcyon Freight", domain: "halcyon.com", ownerName: "Priya", renewalDate: null, annualValue: null, healthScore: null, about: null },
+    contacts: [],
+    commitments: [],
+    recent: [{ id: "src-1", provider: "slack", title: "#halcyon", author: "Lina", occurredAt: new Date("2026-10-10"), content: "Any news on the CSV export you promised? Our finance team is waiting." }],
+    openFlags: [],
+    pendingActions: [],
+    memories: [],
+    history: ["Lina Park (lina@halcyon.com) was a contact at Northwind until 2026-08-01."],
+  } satisfies Omit<AccountContext, "tools">;
+  const tools = { search: async () => [], read: async () => [base.recent[0]!] };
+  const none = { emailTo: [], emailSubject: null, emailBody: null, remindOn: null, message: null };
+  const script = {
+    planner: { summary: "s", questions: [{ question: "Is the export tracked?", why: "w", commitments: [], searches: ["export"] }] },
+    investigator: { answer: "Customer is waiting.", status: "supported", citations: [{ ref: "S1", stance: "supports", excerpt: "Any news on the CSV export you promised?" }] },
+    critic: { reviews: [{ questionId: "Q1", verdict: "approved", reason: "ok", searches: [] }] },
+    advisor: {
+      flags: [],
+      actions: [
+        { type: "create_ticket", flag: null, rationale: "Untracked", ...none, teamKey: "eng", taskTitle: "CSV export for Halcyon", taskBody: "Promised to Lina.", dueDate: null },
+        { type: "create_ticket", flag: null, rationale: "Unknown team", ...none, teamKey: "OPS", taskTitle: "x", taskBody: "y", dueDate: null },
+        { type: "update_crm", flag: null, rationale: "Follow up", ...none, teamKey: null, taskTitle: "Call Lina about the export", taskBody: "Finance waiting", dueDate: "2026-10-15" },
+        { type: "update_crm", flag: null, rationale: "Past", ...none, teamKey: null, taskTitle: "Too late", taskBody: null, dueDate: "2026-10-01" },
+      ],
+    },
+  };
+
+  it("keeps tool actions only for teams and tools the account has", async () => {
+    const { model, calls } = scriptedChatModel(script);
+    const result = await runAccountAgents({ ...base, tools: { linearTeams: [{ key: "ENG", name: "Engineering" }], crmTasks: true } }, { model, tools, onStep: () => {} });
+    expect(result.actions).toEqual([
+      { type: "create_ticket", flag: null, rationale: "Untracked", teamKey: "ENG", title: "CSV export for Halcyon", description: "Promised to Lina." },
+      { type: "update_crm", flag: null, rationale: "Follow up", subject: "Call Lina about the export", body: "Finance waiting", dueDate: "2026-10-15" },
+    ]);
+    // The World Model's history reaches the planner and the advisor; the advisor is told which tools exist.
+    expect(calls.find((c) => c.name === "planner")!.user).toContain("was a contact at Northwind");
+    const advisor = calls.find((c) => c.name === "advisor")!;
+    expect(advisor.user).toContain("was a contact at Northwind");
+    expect(advisor.system).toContain("ENG = Engineering");
+  });
+
+  it("drops tool actions when the tools aren't connected", async () => {
+    const { model, calls } = scriptedChatModel(script);
+    const result = await runAccountAgents({ ...base, tools: { linearTeams: [], crmTasks: false } }, { model, tools, onStep: () => {} });
+    expect(result.actions).toEqual([]);
+    expect(calls.find((c) => c.name === "advisor")!.system).not.toContain("create_ticket files");
   });
 });

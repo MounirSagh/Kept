@@ -1,7 +1,7 @@
 import { ExternalLink, ListChecks } from "lucide-react";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router";
-import { toCommitmentRows, type AccountDto, type CommitmentDto } from "@kept/shared";
+import { toCommitmentRows, type AccountDto, type CommitmentDto, type PromiseSide } from "@kept/shared";
 import { useApi } from "../../api";
 import { memberName, useOrg } from "../../app/org-context";
 import { ImportDialog } from "../../components/ImportDialog";
@@ -70,6 +70,16 @@ export function CommitmentsPage() {
   const { orgId, members } = useOrg();
   const [params, setParams] = useSearchParams();
   const filter = (FILTERS.find((f) => f.id === params.get("status"))?.id ?? "open") as (typeof FILTERS)[number]["id"];
+  // Promises our team made, or promises the customer made to us.
+  const side: PromiseSide = params.get("side") === "theirs" ? "obligation" : "commitment";
+  const setView = (next: { side?: PromiseSide; status?: string }) => {
+    const out = new URLSearchParams();
+    const s = next.side ?? side;
+    const st = next.status ?? filter;
+    if (s === "obligation") out.set("side", "theirs");
+    if (st !== "open") out.set("status", st);
+    setParams(out, { replace: true });
+  };
   const [commitments, setCommitments] = useState<CommitmentDto[] | null>(null);
   const [accounts, setAccounts] = useState<AccountDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -77,14 +87,14 @@ export function CommitmentsPage() {
 
   const load = useCallback(
     () =>
-      Promise.all([api.commitments(orgId, filter === "all" ? {} : { status: filter }), api.accounts(orgId)]).then(
+      Promise.all([api.commitments(orgId, { type: side, ...(filter === "all" ? {} : { status: filter }) }), api.accounts(orgId)]).then(
         ([c, a]) => {
           setCommitments(c);
           setAccounts(a);
         },
         (err: Error) => setError(err.message),
       ),
-    [api, orgId, filter],
+    [api, orgId, filter, side],
   );
   useEffect(() => {
     void load();
@@ -107,7 +117,7 @@ export function CommitmentsPage() {
         Import CSV
       </button>
       <button className={ui.button.primary} onClick={() => setDialog({ kind: "create" })}>
-        Add commitment
+        {side === "obligation" ? "Add customer promise" : "Add commitment"}
       </button>
     </>
   );
@@ -115,16 +125,36 @@ export function CommitmentsPage() {
   return (
     <Page
       title="Commitments"
-      description="Promises your team made to customers: what, to whom, by whom and by when."
+      description={
+        side === "obligation"
+          ? "Promises customers made to your team: documents, approvals, data or payments they owe you."
+          : "Promises your team made to customers: what, to whom, by whom and by when."
+      }
       actions={actions}
     >
+      <div className="mb-4 inline-flex rounded-lg border border-line bg-sidebar p-0.5" role="tablist" aria-label="Who promised">
+        {([["commitment", "Our promises"], ["obligation", "Their promises"]] as const).map(([id, label]) => (
+          <button
+            key={id}
+            role="tab"
+            aria-selected={side === id}
+            onClick={() => setView({ side: id })}
+            className={cx(
+              "rounded-md px-3 py-1 text-sm font-medium transition-colors duration-150",
+              side === id ? "bg-canvas text-ink shadow-sm" : "text-ink-muted hover:text-ink",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
       <div className="mb-5 flex gap-1" role="tablist" aria-label="Status">
         {FILTERS.map((f) => (
           <button
             key={f.id}
             role="tab"
             aria-selected={filter === f.id}
-            onClick={() => setParams(f.id === "open" ? {} : { status: f.id }, { replace: true })}
+            onClick={() => setView({ status: f.id })}
             className={cx(
               "rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-150",
               filter === f.id ? "bg-selected text-ink" : "text-ink-muted hover:bg-hover hover:text-ink",
@@ -173,7 +203,7 @@ export function CommitmentsPage() {
                       <span className="text-ink-faint">· {ORIGIN_LABEL[c.origin]}</span>
                       {c.sourceUrl && (
                         <a href={c.sourceUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-brand hover:underline">
-                          source <ExternalLink className="size-3" aria-hidden />
+                          source{c.sourcePage ? `, p. ${c.sourcePage}` : ""} <ExternalLink className="size-3" aria-hidden />
                         </a>
                       )}
                     </div>
@@ -212,6 +242,7 @@ export function CommitmentsPage() {
         <CommitmentDialog
           commitment={dialog.kind === "edit" ? dialog.commitment : undefined}
           accounts={accounts}
+          side={side}
           onClose={() => setDialog(null)}
           onSaved={load}
         />
@@ -258,14 +289,18 @@ export function CommitmentsPage() {
 function CommitmentDialog({
   commitment,
   accounts,
+  side,
   onClose,
   onSaved,
 }: {
   commitment?: CommitmentDto;
   accounts: AccountDto[];
+  /** Who promised, for a new one: defaults to the list being viewed. */
+  side: PromiseSide;
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
+  const [type, setType] = useState<PromiseSide>(commitment?.type ?? side);
   const api = useApi();
   const { orgId, members, actor } = useOrg();
   const [accountId, setAccountId] = useState(commitment?.accountId ?? (accounts.length === 1 ? accounts[0]!.id : ""));
@@ -284,6 +319,7 @@ function CommitmentDialog({
     void submit(async () => {
       const input = {
         accountId,
+        ...(commitment ? {} : { type }),
         summary,
         dueDate: dueDate || null,
         ownerUserId: ownerUserId || null,
@@ -299,8 +335,16 @@ function CommitmentDialog({
   }
 
   return (
-    <Modal title={commitment ? "Edit commitment" : "Add commitment"} onClose={onClose}>
+    <Modal title={commitment ? (commitment.type === "obligation" ? "Edit customer promise" : "Edit commitment") : "Add a promise"} onClose={onClose}>
       <form className="space-y-4" onSubmit={onSubmit}>
+        {!commitment && (
+          <Field label="Who promised" htmlFor="c-type">
+            <select id="c-type" className={`${ui.select} w-full`} value={type} onChange={(e) => setType(e.target.value as PromiseSide)}>
+              <option value="commitment">Our team, to the customer</option>
+              <option value="obligation">The customer, to us</option>
+            </select>
+          </Field>
+        )}
         <Field label="Account" htmlFor="c-account">
           <select id="c-account" className={`${ui.select} w-full`} value={accountId} onChange={(e) => setAccountId(e.target.value)} required>
             <option value="" disabled>Choose a client…</option>

@@ -1,7 +1,10 @@
 // Microsoft 365 via Microsoft Graph, connected per user (delegated permissions):
-// Outlook inbox and sent mail, Outlook calendar, OneDrive file metadata, Teams chats.
+// Outlook inbox and sent mail with their attachments, Outlook calendar, OneDrive files, Teams chats
+// and the files shared in them. Files are reported as metadata and read later, once routed to a client.
 // Teams channel messages need admin-consented permissions and are not read yet.
 
+import { createHash } from "node:crypto";
+import { fileMetadata, findFileLinks, isDocumentAttachment } from "../files.js";
 import { ApiError, type ApiClient } from "../http.js";
 import { standardToken } from "../oauth.js";
 import { clip, date, htmlToText } from "../text.js";
@@ -24,7 +27,17 @@ interface Message {
   bodyPreview?: string;
   webLink?: string;
   conversationId?: string;
+  hasAttachments?: boolean;
   "@removed"?: unknown;
+}
+
+interface Attachment {
+  id: string;
+  name?: string;
+  contentType?: string;
+  size?: number;
+  isInline?: boolean;
+  "@odata.type"?: string;
 }
 
 const person = (r?: Recipient) =>
@@ -56,11 +69,44 @@ function deltaStep<T>(
   };
 }
 
+/**
+ * One document item per attached file of the emails that have any. Listing attachments without
+ * their content keeps this cheap; the bytes are downloaded only if the email routes to a client.
+ */
+async function withAttachments(client: ApiClient, step: StreamStep): Promise<StreamStep> {
+  const extra: SourceItemInput[] = [];
+  for (const email of step.items) {
+    if (!email.metadata.hasAttachments) continue;
+    const messageId = email.metadata.messageId as string;
+    const page = await client.json<GraphPage<Attachment>>(`/me/messages/${messageId}/attachments?$select=id,name,contentType,size,isInline`);
+    for (const a of page.value) {
+      // Only files: item attachments (forwarded emails) and reference attachments (links) are skipped.
+      if (a["@odata.type"] !== "#microsoft.graph.fileAttachment") continue;
+      if (!isDocumentAttachment({ mimeType: a.contentType, size: a.size, inline: a.isInline })) continue;
+      extra.push({
+        externalId: `${email.externalId}:att:${a.id}`,
+        kind: "document",
+        title: a.name,
+        author: email.author,
+        url: email.url,
+        occurredAt: email.occurredAt,
+        metadata: {
+          from: email.metadata.from,
+          to: email.metadata.to,
+          cc: email.metadata.cc,
+          parent: email.externalId,
+          attachedTo: email.title,
+          ...fileMetadata({ kind: "graph-attachment", messageId, attachmentId: a.id }, { mimeType: a.contentType, size: a.size }),
+        },
+      });
+    }
+  }
+  return { ...step, items: [...step.items, ...extra] };
+}
+
 function mailStream(folder: "inbox" | "sentitems"): Stream {
-  const select = "subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,body,bodyPreview,webLink,conversationId";
-  return {
-    name: `mail_${folder}`,
-    step: deltaStep<Message>(
+  const select = "subject,from,toRecipients,ccRecipients,receivedDateTime,sentDateTime,body,bodyPreview,webLink,conversationId,hasAttachments";
+  const read = deltaStep<Message>(
       (since) =>
         `/me/mailFolders/${folder}/messages/delta?$select=${select}&$filter=receivedDateTime ge ${since.toISOString()}`,
       { Prefer: `${PAGE}, outlook.body-content-type="text"` },
@@ -74,14 +120,16 @@ function mailStream(folder: "inbox" | "sentitems"): Stream {
         contentText: clip(m.body?.content ?? m.bodyPreview ?? ""),
         metadata: {
           folder,
+          messageId: m.id,
           conversationId: m.conversationId,
+          hasAttachments: m.hasAttachments ?? false,
           from: m.from?.emailAddress?.address,
           to: addresses(m.toRecipients),
           cc: addresses(m.ccRecipients),
         },
       }),
-    ),
-  };
+  );
+  return { name: `mail_${folder}`, step: async (client, cursor, ctx) => withAttachments(client, await read(client, cursor, ctx)) };
 }
 
 interface CalendarEvent {
@@ -129,6 +177,7 @@ const calendarStream: Stream = {
 
 interface DriveItem {
   id: string;
+  parentReference?: { id?: string; name?: string };
   name?: string;
   webUrl?: string;
   lastModifiedDateTime?: string;
@@ -139,12 +188,15 @@ interface DriveItem {
   size?: number;
 }
 
-/** File metadata only for now; reading file contents comes with document extraction. */
+/**
+ * OneDrive files, as metadata with their folder (which owners can map to a client on the Routing
+ * page). Contents are read later, only for files routed to a client.
+ */
 const filesStream: Stream = {
   name: "files",
   step: async (client, cursor, ctx) => {
     const step = await deltaStep<DriveItem>(
-      () => `/me/drive/root/delta?$select=id,name,webUrl,lastModifiedDateTime,lastModifiedBy,file,folder,deleted,size`,
+      () => `/me/drive/root/delta?$select=id,name,webUrl,lastModifiedDateTime,lastModifiedBy,file,folder,deleted,size,parentReference`,
       { Prefer: PAGE },
       (f) =>
         f.folder || f.deleted || !f.file
@@ -156,7 +208,13 @@ const filesStream: Stream = {
               author: f.lastModifiedBy?.user?.displayName,
               url: f.webUrl,
               occurredAt: date(f.lastModifiedDateTime),
-              metadata: { mimeType: f.file.mimeType, size: f.size, modifiedBy: f.lastModifiedBy?.user?.email },
+              metadata: {
+                modifiedBy: f.lastModifiedBy?.user?.email,
+                ...fileMetadata({ kind: "onedrive", itemId: f.id }, { mimeType: f.file.mimeType, size: f.size }),
+              },
+              container: f.parentReference?.id
+                ? { id: `folder:${f.parentReference.id}`, label: `OneDrive › ${f.parentReference.name ?? "Folder"}` }
+                : undefined,
             },
     )(client, cursor, ctx);
     // The first delta lists the whole drive; keep only files touched inside the window.
@@ -172,6 +230,7 @@ interface ChatMessage {
   webUrl?: string;
   from?: { user?: { displayName?: string; id?: string } };
   body?: { content?: string; contentType?: string };
+  attachments?: { contentType?: string; contentUrl?: string; name?: string }[];
 }
 
 type ChatsCursor = {
@@ -212,7 +271,7 @@ const chatsStream: Stream = {
     for (const m of page.value) {
       if (m.lastModifiedDateTime && (!pending || m.lastModifiedDateTime > pending)) pending = m.lastModifiedDateTime;
       if (m.messageType && m.messageType !== "message") continue;
-      items.push({
+      const message: SourceItemInput = {
         externalId: `chat:${chat.id}:${m.id}`,
         kind: "message",
         title: chat.topic ?? "Teams chat",
@@ -221,7 +280,21 @@ const chatsStream: Stream = {
         occurredAt: date(m.createdDateTime),
         contentText: m.body?.contentType === "html" ? htmlToText(m.body.content ?? "") : clip(m.body?.content ?? ""),
         metadata: { chatId: chat.id, userId: m.from?.user?.id },
-      });
+      };
+      items.push(message);
+      // Files shared in a chat are OneDrive or SharePoint links ("reference" attachments).
+      for (const a of m.attachments ?? []) {
+        if (a.contentType !== "reference" || !a.contentUrl || findFileLinks(a.contentUrl).length === 0) continue;
+        items.push({
+          externalId: `msfile:${createHash("sha256").update(a.contentUrl).digest("hex").slice(0, 32)}`,
+          kind: "document",
+          title: a.name,
+          author: message.author,
+          url: a.contentUrl,
+          occurredAt: message.occurredAt,
+          metadata: { ...message.metadata, parent: message.externalId, ...fileMetadata({ kind: "ms-share", url: a.contentUrl }, {}) },
+        });
+      }
     }
     const next = page["@odata.nextLink"];
     if (next) return { items, cursor: { ...cursor, messagesNext: next, pending }, more: true };
@@ -243,12 +316,13 @@ export const microsoft: ProviderDefinition = {
   id: "microsoft",
   name: "Microsoft 365",
   scope: "personal",
-  reads: "Your Outlook inbox and sent mail, calendar, OneDrive files and Teams chats. Sends only emails you approve.",
+  reads: "Your Outlook mail and attachments, calendar, OneDrive and SharePoint files, and Teams chats. Sends only emails you approve.",
   oauth: {
     authorizeUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
     tokenUrl: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
     // Mail.Send lets Kept send emails a person approved, from their own mailbox.
-    scopes: ["offline_access", "openid", "email", "User.Read", "Mail.Read", "Mail.Send", "Calendars.Read", "Files.Read", "Chat.Read"],
+    // Files.Read.All and Sites.Read.All: files shared with the person and SharePoint documents linked in conversations.
+    scopes: ["offline_access", "openid", "email", "User.Read", "Mail.Read", "Mail.Send", "Calendars.Read", "Files.Read.All", "Sites.Read.All", "Chat.Read"],
     extraAuthorizeParams: { prompt: "select_account" },
     clientAuth: "body",
     bodyFormat: "form",

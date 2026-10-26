@@ -122,3 +122,41 @@ export function scriptedChatModel(script: Record<string, unknown | ((user: strin
   };
   return { model, calls };
 }
+
+/** Reads the text of a scan or a photo of a document. */
+export interface Transcriber {
+  transcribe(file: { bytes: Uint8Array; mimeType: string; name: string }): Promise<{ text: string; usage: Usage }>;
+}
+
+const TRANSCRIBE_PROMPT = `Transcribe all the text in this document, exactly as written, in reading order.
+Keep headings, lists and table rows (cells separated by " | "). For a multi-page document, start each page with "[Page N]".
+Don't summarize, translate, correct or add anything. If a part is unreadable, write [unreadable].`;
+
+/**
+ * OCR through the fast model: PDFs are sent as files, images as images. Used only for files with
+ * no text layer, since it costs far more than reading text.
+ */
+export function openAITranscriber(opts: { apiKey?: string; model?: string } = {}): Transcriber {
+  let client: OpenAI | null = null;
+  return {
+    async transcribe(file) {
+      const apiKey = opts.apiKey ?? process.env.OPENAI_API_KEY;
+      if (!apiKey) throw new Error("OPENAI_API_KEY is not set");
+      client ??= new OpenAI({ apiKey, timeout: REQUEST_TIMEOUT_MS, maxRetries: 2 });
+      const model = opts.model || process.env.OPENAI_FAST_MODEL || DEFAULT_FAST_MODEL;
+      const data = `data:${file.mimeType};base64,${Buffer.from(file.bytes).toString("base64")}`;
+      const part =
+        file.mimeType === "application/pdf"
+          ? { type: "input_file" as const, filename: file.name, file_data: data }
+          : { type: "input_image" as const, image_url: data, detail: "high" as const };
+      const res = await client.responses.create({
+        model,
+        input: [{ role: "user", content: [{ type: "input_text", text: TRANSCRIBE_PROMPT }, part] }],
+        ...(isReasoningModel(model) ? { reasoning: { effort: "low" as const } } : {}),
+      });
+      const inputTokens = res.usage?.input_tokens ?? 0;
+      const outputTokens = res.usage?.output_tokens ?? 0;
+      return { text: res.output_text ?? "", usage: { inputTokens, outputTokens, costUsd: costUsd(model, inputTokens, outputTokens) } };
+    },
+  };
+}

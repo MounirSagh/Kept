@@ -62,6 +62,8 @@ model Organization {
   name      String
   slug      String   @unique
   settings  Json     @default("{}")
+  /// The org's local date of its last daily sweep, so each day's sweep runs once.
+  lastSweepOn DateTime? @map("last_sweep_on") @db.Date
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -114,6 +116,8 @@ model Membership {
   role      OrgRole  @default(member)
   teamId    String?  @map("team_id") @db.Uuid
   joinedAt  DateTime @default(now()) @map("joined_at")
+  /// The org's local date of this person's last daily digest, so it's sent once a day.
+  lastDigestOn DateTime? @map("last_digest_on") @db.Date
   updatedAt DateTime @updatedAt @map("updated_at")
 
   org  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
@@ -396,6 +400,11 @@ model SourceMapping {
   containerLabel String?  @map("container_label")
   accountId      String?  @map("account_id") @db.Uuid
   ignored        Boolean  @default(false)
+  /// "owner": set on the Routing page. "auto": set by Kept from the container's name or its people,
+  /// until an owner confirms or changes it. Kept never changes a mapping an owner set.
+  origin         String   @default("owner")
+  /// Why Kept routed it, for auto mappings: shown on the Routing page.
+  reason         String?
   createdById    String?  @map("created_by_id") @db.Uuid
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
@@ -706,6 +715,8 @@ enum ActionType {
   update_crm
   schedule_reminder
   internal_alert
+  /// Set a company's renewal date or contract value from a contract Kept read.
+  update_account
 }
 
 enum ActionStatus {

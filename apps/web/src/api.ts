@@ -16,6 +16,7 @@ import type {
   ContactDto,
   ContactInput,
   ContactRowDto,
+  DocumentDto,
   PageDto,
   ConnectionsDto,
   CreatedInvitationDto,
@@ -32,6 +33,7 @@ import type {
   OrgRole,
   RoutingDto,
   RoutingMappingInput,
+  RoutingSettingsInput,
   TeamDto,
 } from "@kept/shared";
 
@@ -130,6 +132,7 @@ export function useApi() {
         request<PageDto<AccountDto>>(`/orgs/${orgId}/accounts/page?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`),
       contactsPage: (orgId: string, query: Record<string, string | number>) =>
         request<PageDto<ContactRowDto>>(`/orgs/${orgId}/contacts?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`),
+      accountDocuments: (orgId: string, accountId: string) => request<DocumentDto[]>(`/orgs/${orgId}/accounts/${accountId}/documents`),
       contacts: (orgId: string, accountId: string) => request<ContactDto[]>(`/orgs/${orgId}/accounts/${accountId}/contacts`),
       createContact: (orgId: string, accountId: string, input: ContactInput) =>
         request<ContactDto>(`/orgs/${orgId}/accounts/${accountId}/contacts`, { method: "POST", body: JSON.stringify(input) }),
@@ -137,7 +140,7 @@ export function useApi() {
         request<ContactDto>(`/orgs/${orgId}/contacts/${contactId}`, { method: "PATCH", body: JSON.stringify(input) }),
       deleteContact: (orgId: string, contactId: string) => request<void>(`/orgs/${orgId}/contacts/${contactId}`, { method: "DELETE" }),
 
-      commitments: (orgId: string, filter: { status?: string; accountId?: string } = {}) => {
+      commitments: (orgId: string, filter: { status?: string; accountId?: string; type?: "commitment" | "obligation" } = {}) => {
         const q = new URLSearchParams(Object.entries(filter).filter(([, v]) => v) as [string, string][]);
         return request<CommitmentDto[]>(`/orgs/${orgId}/commitments${q.size ? `?${q}` : ""}`);
       },
@@ -159,6 +162,8 @@ export function useApi() {
         request<void>(`/orgs/${orgId}/accounts/${accountId}`, { method: "DELETE" }),
 
       routing: (orgId: string) => request<RoutingDto>(`/orgs/${orgId}/routing`),
+      setRoutingSettings: (orgId: string, input: RoutingSettingsInput) =>
+        request<void>(`/orgs/${orgId}/routing/settings`, { method: "PUT", body: JSON.stringify(input) }),
       setRouting: (orgId: string, connectionId: string, containerId: string, input: RoutingMappingInput) =>
         request<void>(`/orgs/${orgId}/routing/${connectionId}/${encodeURIComponent(containerId)}`, {
           method: "PUT",

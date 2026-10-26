@@ -3,6 +3,7 @@
 // use needs Google's app verification and a security assessment (testing mode allows up to 100 test users).
 // gmail.send lets Kept send emails a person approved, from their own mailbox.
 
+import { fileMetadata, isDocumentAttachment } from "../files.js";
 import { ApiError, type ApiClient } from "../http.js";
 import { standardToken } from "../oauth.js";
 import { clip, date, htmlToText } from "../text.js";
@@ -10,7 +11,14 @@ import type { ProviderDefinition, SourceItemInput, Stream } from "../types.js";
 
 // ------------------------------------------------------------------ Gmail
 
-type GmailPart = { mimeType?: string; body?: { data?: string }; parts?: GmailPart[]; headers?: { name: string; value: string }[] };
+type GmailPart = {
+  partId?: string;
+  mimeType?: string;
+  filename?: string;
+  body?: { data?: string; attachmentId?: string; size?: number };
+  parts?: GmailPart[];
+  headers?: { name: string; value: string }[];
+};
 interface GmailMessage {
   id: string;
   threadId?: string;
@@ -33,23 +41,54 @@ function findPart(part: GmailPart | undefined, mime: string): GmailPart | undefi
   return undefined;
 }
 
-export function mapGmail(m: GmailMessage): SourceItemInput | null {
-  if (m.labelIds?.some((l) => l === "DRAFT" || l === "SPAM" || l === "TRASH")) return null;
+/** Attached files (not inline images), anywhere in the MIME tree. */
+function attachments(part: GmailPart | undefined): GmailPart[] {
+  if (!part) return [];
+  const inline = part.headers?.some((h) => h.name.toLowerCase() === "content-disposition" && h.value.toLowerCase().startsWith("inline"));
+  const self = part.filename && part.body?.attachmentId && isDocumentAttachment({ mimeType: part.mimeType, size: part.body.size, inline }) ? [part] : [];
+  return [...self, ...(part.parts ?? []).flatMap(attachments)];
+}
+
+/** The email, followed by one document item per attached file. */
+export function mapGmail(m: GmailMessage): SourceItemInput[] {
+  if (m.labelIds?.some((l) => l === "DRAFT" || l === "SPAM" || l === "TRASH")) return [];
   const header = (name: string) => m.payload?.headers?.find((h) => h.name.toLowerCase() === name)?.value;
   const plain = findPart(m.payload, "text/plain");
   const html = findPart(m.payload, "text/html");
   const text = plain ? clip(decode(plain.body?.data)) : html ? htmlToText(decode(html.body?.data)) : (m.snippet ?? "");
   const list = (v?: string) => (v ? v.split(",").map((s) => s.trim()).filter(Boolean) : []);
-  return {
+  const files = attachments(m.payload);
+  const url = `https://mail.google.com/mail/u/0/#all/${m.id}`;
+  const occurredAt = date(Number(m.internalDate));
+  // Attachments route like their email: same participants.
+  const people = { to: list(header("to")), cc: list(header("cc")) };
+  const email: SourceItemInput = {
     externalId: `gmail:${m.id}`,
     kind: "email",
     title: header("subject") ?? "(no subject)",
     author: header("from"),
-    url: `https://mail.google.com/mail/u/0/#all/${m.id}`,
-    occurredAt: date(Number(m.internalDate)),
-    contentText: text,
-    metadata: { threadId: m.threadId, labels: m.labelIds ?? [], to: list(header("to")), cc: list(header("cc")), sent: m.labelIds?.includes("SENT") ?? false },
+    url,
+    occurredAt,
+    contentText: files.length ? `${text}\n\n[Attached: ${files.map((f) => f.filename).join(", ")}]` : text,
+    metadata: { threadId: m.threadId, labels: m.labelIds ?? [], ...people, sent: m.labelIds?.includes("SENT") ?? false },
   };
+  return [
+    email,
+    ...files.map((f) => ({
+      externalId: `gmail:${m.id}:part:${f.partId}`,
+      kind: "document" as const,
+      title: f.filename,
+      author: header("from"),
+      url,
+      occurredAt,
+      metadata: {
+        ...people,
+        parent: email.externalId,
+        attachedTo: email.title,
+        ...fileMetadata({ kind: "gmail-attachment", messageId: m.id, partId: f.partId! }, { mimeType: f.mimeType, size: f.body?.size }),
+      },
+    })),
+  ];
 }
 
 type GmailCursor =
@@ -68,7 +107,7 @@ async function fetchMessages(client: ApiClient, ids: string[]): Promise<SourceIt
         }),
     ),
   );
-  return messages.filter((m): m is GmailMessage => !!m).map(mapGmail).filter((i): i is SourceItemInput => !!i);
+  return messages.filter((m): m is GmailMessage => !!m).flatMap(mapGmail);
 }
 
 /** Backfills the window with a search, then follows the history API from where the backfill began. */
@@ -121,6 +160,7 @@ interface GEvent {
   end?: { dateTime?: string; date?: string };
   organizer?: { email?: string; displayName?: string };
   attendees?: { email?: string }[];
+  attachments?: { fileId?: string; fileUrl?: string; title?: string; mimeType?: string }[];
 }
 
 type CalendarCursor = { phase: "backfill" | "updates"; pageToken?: string; watermark: string; maxSeen?: string };
@@ -144,6 +184,20 @@ const calendarStream: Stream = {
     for (const e of page.items ?? []) {
       if (e.updated && (!maxSeen || e.updated > maxSeen)) maxSeen = e.updated;
       if (e.status === "cancelled") continue;
+      const participants = { organizer: e.organizer?.email, attendees: (e.attendees ?? []).map((a) => a.email).filter(Boolean) };
+      // Agendas and decks attached to the meeting: Drive files, routed by the meeting's attendees.
+      for (const a of e.attachments ?? []) {
+        if (!a.fileId) continue;
+        items.push({
+          externalId: `gdrive:${a.fileId}`,
+          kind: "document",
+          title: a.title,
+          author: e.organizer?.displayName ?? e.organizer?.email,
+          url: a.fileUrl,
+          occurredAt: date(e.start?.dateTime ?? e.start?.date),
+          metadata: { ...participants, parent: `gcal:${e.id}`, attachedTo: e.summary, ...fileMetadata({ kind: "gdrive", fileId: a.fileId }, { mimeType: a.mimeType }) },
+        });
+      }
       items.push({
         externalId: `gcal:${e.id}`,
         kind: "event",
@@ -175,14 +229,22 @@ interface GFile {
   mimeType?: string;
   modifiedTime?: string;
   webViewLink?: string;
+  size?: string;
+  parents?: string[];
+  permissions?: { type?: string; emailAddress?: string; domain?: string }[];
   lastModifyingUser?: { displayName?: string; emailAddress?: string };
 }
 
-const GOOGLE_DOC = "application/vnd.google-apps.document";
+type DriveCursor = { watermark?: string; pageToken?: string; maxSeen?: string; folders?: Record<string, string> };
 
-type DriveCursor = { watermark?: string; pageToken?: string; maxSeen?: string };
+/** Folder names remembered between syncs, for labeling containers. */
+const MAX_FOLDER_NAMES = 500;
 
-/** Files modified since the watermark. Google Docs are exported as text; other files are metadata only for now. */
+/**
+ * Files modified since the watermark, as metadata: who they're shared with (people and domains,
+ * so a file shared with @northwind.com routes to Northwind) and their folder (which owners can map
+ * to a client on the Routing page). Contents are read later, only for files routed to a client.
+ */
 const driveStream: Stream = {
   name: "drive",
   async step(client, raw, ctx) {
@@ -194,18 +256,26 @@ const driveStream: Stream = {
         orderBy: "modifiedTime",
         pageSize: 50,
         pageToken: cursor.pageToken,
-        fields: "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,lastModifyingUser(displayName,emailAddress))",
+        fields:
+          "nextPageToken,files(id,name,mimeType,modifiedTime,webViewLink,size,parents,permissions(type,emailAddress,domain),lastModifyingUser(displayName,emailAddress))",
       },
     });
+
+    const folders = { ...(cursor.folders ?? {}) };
+    for (const parent of new Set((page.files ?? []).map((f) => f.parents?.[0]).filter((p): p is string => !!p))) {
+      if (folders[parent]) continue;
+      const folder = await client.json<{ name?: string }>(`/drive/v3/files/${parent}`, { query: { fields: "name" } }).catch(() => ({ name: undefined }));
+      folders[parent] = folder.name ?? "Folder";
+    }
+    // Keep the most recent names only.
+    const keptFolders = Object.fromEntries(Object.entries(folders).slice(-MAX_FOLDER_NAMES));
 
     let maxSeen = cursor.maxSeen;
     const items: SourceItemInput[] = [];
     for (const f of page.files ?? []) {
       if (f.modifiedTime && (!maxSeen || f.modifiedTime > maxSeen)) maxSeen = f.modifiedTime;
-      const text =
-        f.mimeType === GOOGLE_DOC
-          ? await client.text(`/drive/v3/files/${f.id}/export`, { query: { mimeType: "text/plain" } }).catch(() => undefined)
-          : undefined;
+      const perms = f.permissions ?? [];
+      const parent = f.parents?.[0];
       items.push({
         externalId: `gdrive:${f.id}`,
         kind: "document",
@@ -213,12 +283,17 @@ const driveStream: Stream = {
         author: f.lastModifyingUser?.displayName,
         url: f.webViewLink,
         occurredAt: date(f.modifiedTime),
-        contentText: text ? clip(text) : undefined,
-        metadata: { mimeType: f.mimeType, modifiedBy: f.lastModifyingUser?.emailAddress },
+        metadata: {
+          modifiedBy: f.lastModifyingUser?.emailAddress,
+          sharedWith: perms.filter((p) => p.emailAddress).map((p) => p.emailAddress!.toLowerCase()),
+          sharedWithDomains: perms.filter((p) => p.type === "domain" && p.domain).map((p) => p.domain!.toLowerCase()),
+          ...fileMetadata({ kind: "gdrive", fileId: f.id }, { mimeType: f.mimeType, size: f.size ? Number(f.size) : null }),
+        },
+        container: parent ? { id: `folder:${parent}`, label: `Drive › ${keptFolders[parent] ?? "Folder"}` } : undefined,
       });
     }
-    if (page.nextPageToken) return { items, cursor: { watermark, pageToken: page.nextPageToken, maxSeen }, more: true };
-    return { items, cursor: { watermark: maxSeen ?? watermark }, more: false };
+    if (page.nextPageToken) return { items, cursor: { watermark, pageToken: page.nextPageToken, maxSeen, folders: keptFolders }, more: true };
+    return { items, cursor: { watermark: maxSeen ?? watermark, folders: keptFolders }, more: false };
   },
 };
 

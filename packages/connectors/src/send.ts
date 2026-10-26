@@ -15,6 +15,18 @@ export function canSendMail(provider: string, scopes: string[]): boolean {
   return !!needed && scopes.some((s) => s === needed || s.endsWith(`/${needed}`));
 }
 
+/** The scope each tool needs for the actions Kept takes in it. Connections made before it was added lack it. */
+export const ACTION_SCOPES: Partial<Record<ProviderId, string>> = {
+  linear: "issues:create",
+  hubspot: "crm.objects.contacts.write",
+};
+
+export function canAct(provider: string, scopes: string[]): boolean {
+  const needed = ACTION_SCOPES[provider as ProviderId];
+  // Linear's broad "write" scope also covers creating issues.
+  return !!needed && (scopes.includes(needed) || (provider === "linear" && scopes.includes("write")));
+}
+
 export interface OutgoingMail {
   to: string[];
   subject: string;

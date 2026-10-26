@@ -2,7 +2,7 @@
 
 Kept watches what your team promises customers, in email, Slack, tickets, CRM notes and documents, and warns you before a promise is broken.
 
-It reads your tools, finds every commitment ("we'll have the fix live by Friday"), keeps them in one list per client, and flags the ones at risk with the evidence behind them. For each flag it drafts the next step (an email to the customer, a reminder, an alert), and nothing happens until a person approves it.
+It reads your tools and the documents shared in them, finds every commitment ("we'll have the fix live by Friday"), keeps them in one list per client, and flags the ones at risk with the evidence behind them. For each flag it drafts the next step (an email to the customer, a reminder, a team alert, a Linear issue, a HubSpot task), and nothing happens until a person approves it.
 
 ---
 
@@ -138,6 +138,15 @@ Then set `WEB_ORIGIN=https://<your-static-domain>.ngrok-free.dev` in `.env`, res
 
 After connecting, Kept syncs every 15 minutes. Use **Sync now** on the Integrations page to sync straight away.
 
+**Connected a tool before October 2026?** Kept asks for a few more permissions now. Grant them by reconnecting on the Integrations page:
+
+| Tool | New permissions | What they're for |
+| --- | --- | --- |
+| Slack | `files:read`, `users:read.email` | Reading files shared in channels; routing messages by their author's email. Add them to the Slack app and **Reinstall to Workspace** first |
+| Microsoft 365 | `Files.Read.All`, `Sites.Read.All` | Opening files shared with you and SharePoint links |
+| Linear | `issues:create` | Filing the issues you approve |
+| HubSpot | `crm.objects.contacts.write`, `crm.objects.owners.read` | Adding the tasks you approve. Run `hs project upload` in `hubspot/` first |
+
 ---
 
 ## How it works
@@ -150,16 +159,20 @@ Your tools ──► Sync ──► Routing ──► Extraction ──► Agent
 ```
 
 1. **Sync.** The worker pulls new messages, emails, issues, notes and CRM records from connected tools.
-2. **Routing.** Each item is assigned to a client company by email domain, contacts, or the channel mappings you set on the **Routing** page. Slack channels and Linear teams are routed by hand once.
-3. **Extraction.** OpenAI reads each new item and records commitments, customer obligations, deadlines, decisions and risks. Every result must quote its source exactly, or it's discarded.
-4. **Agents.** For each company with new activity, four agents run (LangGraph):
+2. **Routing.** Each item is assigned to a client company by email domain or contacts. Slack channels, Linear teams, Notion spaces and folders are routed automatically when their name names one client (`#ext-northwind`) or nearly all of their messages from clients come from one client's people; you confirm those, and route the rest, on the **Routing** page.
+3. **Documents.** Files attached to client emails and Slack messages, shared with client contacts in Drive or OneDrive, kept in a client's mapped folder, or linked from a client conversation are downloaded and read once they're routed (PDF, Word, Excel, PowerPoint, Google files; scans through OCR). They're listed under **Documents** on the company page.
+4. **Extraction.** OpenAI reads each new item (including Slack thread replies and documents, section by section, with the page each quote is on) and records promises your team made, promises customers made, deadlines, decisions and risks. Every result must quote its source exactly, or it's discarded. When a later message shows a promise was kept, it's marked fulfilled and its flags close by themselves. Contracts are also read for their renewal date and yearly value, suggested as a **Company update** to approve.
+5. **Agents.** For each company with new activity, and every morning for companies with promises coming due or a renewal close (the *daily sweep*), four agents run (LangGraph):
    - **Planner:** decides what to check.
    - **Investigator:** searches that company's messages and answers with quotes.
    - **Critic:** rejects anything the quotes don't support.
    - **Advisor:** raises flags and drafts actions.
-5. **Approvals.** Every suggested email, reminder and alert waits on the **Approvals** page to be edited, approved or rejected.
-6. **Executor.** Approved emails go out from the approver's own Gmail or Outlook. Reminders and alerts are emailed to the account owner.
-7. **Memory.** When you dismiss a flag or reject a suggestion, Kept remembers why (H-MEM) and takes it into account next time.
+
+   Besides the company's recent messages, the agents read its history from the World Model: how its renewal date and contract value changed and why, its track record of kept and broken promises, and contacts who joined from or left for another client.
+6. **Approvals.** Every suggested email, reminder, alert, company update, Linear issue and HubSpot task waits on the **Approvals** page to be edited, approved or rejected.
+7. **Executor.** Approved emails go out from the approver's own Gmail or Outlook. Reminders and alerts are emailed to the account owner. Linear issues are filed in the team chosen on approval; HubSpot tasks are added to the company's record and assigned to the account owner when their email matches a HubSpot user.
+8. **Memory.** When you dismiss a flag or reject a suggestion, Kept remembers why (H-MEM) and takes it into account next time.
+9. **Daily digest.** Each morning (in the organization's time zone, set under **Settings → Organization**), everyone gets one email with what's at risk on their companies, their promises coming due, what customers owe them, and the suggestions waiting for them. No email on days with nothing to report.
 
 ---
 
@@ -187,6 +200,7 @@ packages/
   shared/     Types, queue names and permission rules shared by all apps
   agents/     Extraction and the LangGraph agents (OpenAI)
   connectors/ Microsoft 365, Google, Slack, Linear, Notion and HubSpot connectors
+  documents/  Reads PDF, Word, Excel, PowerPoint and text files into plain text
   world-model/ Shared account graph (Meterless World Model)
   hmem/       Long-term memory (Meterless H-MEM)
   llm/        OpenAI embeddings
@@ -226,11 +240,18 @@ pnpm stack:down
 | **`401 Unauthorized` on `/api/me`** after signing in | Open the app at the address in `WEB_ORIGIN` (or `http://localhost:<WEB_PORT>`). If you just changed `.env`, restart `pnpm dev` |
 | **`429 You have no credits remaining`** in the worker log | Add credits to your OpenAI account. Nothing is lost: items are read once credits are back |
 | **A tool says "Not set up"** on Integrations | Both its `_CLIENT_ID` and `_CLIENT_SECRET` must be in `.env`; then restart `pnpm dev` |
-| **Slack messages don't show up** | Invite the bot to the channel (`/invite @Kept`), post top-level messages (thread replies aren't read yet), then **Sync now** |
-| **A channel's messages have no company** | Map the channel to a company on the **Routing** page |
+| **Slack messages don't show up** | Invite the bot to the channel (`/invite @Kept`), then **Sync now**. Replies to threads quiet for more than 14 days aren't picked up |
+| **A channel's messages have no company** | Route the channel on the **Routing** page. Kept routes it by itself only if its name names one client, or if it has at least 3 messages from one client's people (Slack needs `users:read.email`: reinstall the app) |
+| **A channel was routed to the wrong company** | On **Routing**, under *Routed automatically*, choose **Change**. Kept won't route it again by itself. Turn **Route automatically** off to stop it altogether |
 | **Approving an email fails** | Connect Gmail or Outlook with permission to send (reconnect it if it was connected before sending was added) |
-| **Emails don't arrive** | Without `RESEND_API_KEY` they're only printed in the worker log. With Resend's default sender they only reach your own Resend address |
+| **Emails don't arrive** (invitations, reminders, digests) | Without `RESEND_API_KEY` they're only printed in the worker log. With Resend's default sender they only reach your own Resend address |
+| **No daily digest** | It goes out after 8:00 in the organization's time zone, only to people with something to report. The worker must be running |
 | **An agent run shows "Interrupted"** | The worker restarted mid-run (in development, saving a file restarts it). The next new activity on that company starts a fresh run |
+| **A document says "No access"** | Reconnect the tool that synced it: Slack needs `files:read` (reinstall the app), Microsoft needs `Files.Read.All` and `Sites.Read.All`. A file nobody at your company can open stays unreadable |
+| **A document says "Scanned, too long to read" or "Format Kept can't read"** | Scans over 20 pages or 10 MB aren't OCR'd. Old `.doc`/`.xls`, zips and videos aren't read; save as PDF or a modern Office format |
+| **A contract isn't on the company page** | It must reach the client: attached to their email, shared with their address in Drive/OneDrive, in a folder mapped on **Routing**, or linked in one of their channels |
+| **A Linear issue or HubSpot task fails with "Reconnect…"** | Kept needs permission to create records: reconnect Linear (`issues:create`) or HubSpot (`crm.objects.contacts.write`, `crm.objects.owners.read`; upload the HubSpot app first with `hs project upload`) |
+| **No Linear issue or HubSpot task is ever suggested** | Linear: Kept offers teams it has seen in synced issues. HubSpot: only for companies imported from HubSpot |
 | **Database errors after pulling new code** | Run `pnpm db:deploy` to apply new migrations |
 
 More detail: [docs/architecture.md](docs/architecture.md) (how the system is built) and [docs/connectors.md](docs/connectors.md) (tool setup).

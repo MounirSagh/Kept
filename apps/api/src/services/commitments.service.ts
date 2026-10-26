@@ -1,15 +1,18 @@
-import type { ExtractedItem, Prisma } from "@kept/db";
-import type { CommitmentDto, CommitmentImportRow, CommitmentInput, ImportResultDto, SeverityValue } from "@kept/shared";
+import { closeFlagsForCommitment, type ExtractedItem, type Prisma } from "@kept/db";
+import type { CommitmentDto, CommitmentImportRow, CommitmentInput, ImportResultDto, PromiseSide, SeverityValue } from "@kept/shared";
 import { HttpError } from "../lib/http-error.js";
 import { prisma } from "../lib/prisma.js";
 import type { OrgActor } from "../types/express.js";
 import { MAX_IMPORT_ROWS, canSeeAccount, membersByEmail, visibleAccountsWhere } from "./accounts.service.js";
 
-/** Commitments follow their account's visibility; ones not tied to an account stay with whoever they're private to. */
+/**
+ * Promises, ours ("commitment") and the customer's ("obligation"), follow their account's visibility;
+ * ones not tied to an account stay with whoever they're private to.
+ */
 function visibleCommitmentsWhere(actor: OrgActor): Prisma.ExtractedItemWhereInput {
   return {
     orgId: actor.orgId,
-    type: "commitment",
+    type: { in: ["commitment", "obligation"] },
     deletedAt: null,
     OR: [{ account: visibleAccountsWhere(actor) }, { visibleToUserId: actor.userId }],
   };
@@ -38,8 +41,10 @@ function toDto(c: Row): CommitmentDto {
     ownerUserId: c.ownerUserId,
     dueDate: dateOnly(c.dueDate),
     status: c.status,
+    type: c.type === "obligation" ? "obligation" : "commitment",
     origin: c.origin,
     sourceUrl: c.sourceItem?.url ?? null,
+    sourcePage: typeof (c.details as { page?: unknown } | null)?.page === "number" ? ((c.details as { page: number }).page) : null,
     createdAt: c.createdAt.toISOString(),
     risk: (() => {
       const top = [...(c.flags ?? [])].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity])[0];
@@ -56,11 +61,12 @@ const include = {
 } satisfies Prisma.ExtractedItemInclude;
 
 /** Open commitments first, soonest due first (undated last); then everything else, newest first. */
-export async function listCommitments(actor: OrgActor, filter: { status?: string; accountId?: string }) {
+export async function listCommitments(actor: OrgActor, filter: { status?: string; accountId?: string; type?: PromiseSide }) {
   const rows = await prisma.extractedItem.findMany({
     where: {
       AND: [
         visibleCommitmentsWhere(actor),
+        { type: filter.type ?? "commitment" },
         filter.status ? { status: filter.status as CommitmentDto["status"] } : {},
         filter.accountId ? { accountId: filter.accountId } : {},
       ],
@@ -93,7 +99,7 @@ export async function createCommitment(actor: OrgActor, input: CommitmentInput) 
     data: {
       orgId: actor.orgId,
       accountId: input.accountId,
-      type: "commitment",
+      type: input.type ?? "commitment",
       summary: input.summary,
       details: input.notes ? { notes: input.notes } : {},
       madeBy: input.madeBy,
@@ -128,12 +134,17 @@ export async function updateCommitment(actor: OrgActor, id: string, input: Parti
     },
     include,
   });
+  if (input.status === "fulfilled" && existing.status !== "fulfilled") {
+    await closeFlagsForCommitment(prisma, actor.orgId, id, "Marked fulfilled");
+    return toDto({ ...c, flags: [] });
+  }
   return toDto(c);
 }
 
 export async function deleteCommitment(actor: OrgActor, id: string) {
   await findVisible(actor, id);
   await prisma.extractedItem.update({ where: { id }, data: { deletedAt: new Date() } });
+  await closeFlagsForCommitment(prisma, actor.orgId, id, "Commitment deleted");
 }
 
 /**

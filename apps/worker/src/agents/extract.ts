@@ -1,10 +1,13 @@
 import type { Job, Queue } from "bullmq";
-import type { Prisma, PrismaClient } from "@kept/db";
-import { extractFromItem, type ChatModel, type ExtractedFinding } from "@kept/agents";
+import { closeFlagsForCommitment, type Prisma, type PrismaClient } from "@kept/db";
+import { extractFromItem, looksLikeContract, readContractTerms, type ChatModel, type ExtractedFinding, type Transcriber } from "@kept/agents";
+import type { ConnectorConfig } from "@kept/connectors";
+import { pageOf } from "@kept/documents";
 import { WorldModel } from "@kept/world-model";
 import { prismaWorldStorage } from "@kept/world-model/prisma";
-import type { AgentRunJobData, ExtractJobData } from "@kept/shared";
+import type { AccountUpdatePayload, AgentRunJobData, ExtractJobData } from "@kept/shared";
 import { FREE_MAIL_DOMAINS } from "../matching/match.js";
+import { readPendingDocuments } from "./documents.js";
 
 /** Items per job; a larger backlog continues in a follow-up job so other orgs get a turn. */
 const BATCH = 25;
@@ -19,6 +22,10 @@ interface Deps {
   model: ChatModel | null;
   extractQueue: Queue<ExtractJobData>;
   agentRunQueue: Queue<AgentRunJobData>;
+  /** For downloading files routed to a client; null without TOKEN_ENCRYPTION_KEY. */
+  config: ConnectorConfig | null;
+  /** OCR for scans; null without OPENAI_API_KEY. */
+  transcriber: Transcriber | null;
 }
 
 export function createExtractProcessor(deps: Deps) {
@@ -26,18 +33,26 @@ export function createExtractProcessor(deps: Deps) {
     const { orgId } = job.data;
     if (!deps.model) return { skipped: "OPENAI_API_KEY is not set" };
 
+    // Files routed to a client are read first, so their text is extracted in this same job.
+    const documents = await readPendingDocuments(deps.prisma, deps.config, deps.transcriber, orgId);
     const result = await extractOrg(deps.prisma, deps.model, orgId);
     for (const accountId of result.accounts) await queueAccountRun(deps.prisma, deps.agentRunQueue, orgId, accountId);
-    if (result.more) await deps.extractQueue.add("extract", { orgId }, { removeOnComplete: true, removeOnFail: 100 });
-    return { ...result, accounts: result.accounts.length };
+    if (result.more || documents.more) await deps.extractQueue.add("extract", { orgId }, { removeOnComplete: true, removeOnFail: 100 });
+    return { ...result, accounts: result.accounts.length, documentsRead: documents.read, documentsSkipped: documents.skipped };
   };
 }
 
 /** One run per account at a time in the queue: a run that hasn't started yet will see the new data anyway. */
-export async function queueAccountRun(prisma: PrismaClient, queue: Queue<AgentRunJobData>, orgId: string, accountId: string) {
+export async function queueAccountRun(
+  prisma: PrismaClient,
+  queue: Queue<AgentRunJobData>,
+  orgId: string,
+  accountId: string,
+  trigger: "new_data" | "schedule" = "new_data",
+) {
   const waiting = await prisma.agentRun.count({ where: { orgId, accountId, status: "queued" } });
   if (waiting > 0) return null;
-  const run = await prisma.agentRun.create({ data: { orgId, accountId, trigger: "new_data" } });
+  const run = await prisma.agentRun.create({ data: { orgId, accountId, trigger } });
   await queue.add("run", { runId: run.id }, { jobId: run.id });
   return run.id;
 }
@@ -59,6 +74,8 @@ export async function extractOrg(prisma: PrismaClient, model: ChatModel, orgId: 
     SELECT id FROM source_items
     WHERE org_id = ${orgId}::uuid AND match_status = 'matched' AND deleted_at IS NULL
       AND kind <> 'crm_record' AND extracted_hash IS DISTINCT FROM content_hash
+      -- Files are extracted once read (or OCR'd); until then they're only a name.
+      AND (kind <> 'document' OR coalesce(metadata->>'contentStatus', 'read') IN ('read', 'ocr'))
     ORDER BY occurred_at ASC
     LIMIT ${BATCH}`;
   if (pending.length === 0) return { processed: 0, created: 0, updated: 0, dropped: 0, accounts: [] as string[], more: false };
@@ -138,6 +155,8 @@ export async function extractOrg(prisma: PrismaClient, model: ChatModel, orgId: 
             confidence: f.confidence,
             sourceItemId: item.id,
             sourceExcerpt: f.excerpt,
+            // Where in the document the quote is, for "MSA, p. 4".
+            ...(item.kind === "document" && item.contentText ? { details: { page: pageOf(item.contentText, f.excerpt) } } : {}),
             origin: "extracted",
             visibleToUserId: item.visibleToUserId,
           },
@@ -152,10 +171,20 @@ export async function extractOrg(prisma: PrismaClient, model: ChatModel, orgId: 
         const details = { ...((target?.details as Prisma.JsonObject | null) ?? {}), statusChange: { status: u.status, sourceItemId: item.id, excerpt: u.excerpt, at: item.occurredAt.toISOString() } };
         const changed = await tx.extractedItem.updateMany({ where: { id: targetId, status: "open" }, data: { status: u.status, details } });
         updated += changed.count;
+        // Kept or replaced: its flags are done. A broken promise keeps its flag; that still needs someone.
+        if (changed.count > 0 && u.status !== "broken") {
+          const reason = u.status === "fulfilled" ? `Promise kept: "${u.excerpt}"` : `Promise replaced: "${u.excerpt}"`;
+          await closeFlagsForCommitment(tx, orgId, targetId, reason);
+        }
       }
       await tx.sourceItem.update({ where: { id }, data: { extractedHash: item.contentHash } });
     });
     if (result.items.length > 0 || result.updates.length > 0) touched.add(account.id);
+
+    // A contract may state the renewal date and value: suggested onto the company, never set silently.
+    if (item.kind === "document" && item.contentText && looksLikeContract(item.title, item.contentText)) {
+      await proposeContractTerms(prisma, model, { orgId, account, item: { id: item.id, title: item.title, content: item.contentText } });
+    }
   }
 
   await recordInWorldModel(prisma, orgId, created);
@@ -191,4 +220,58 @@ async function recordInWorldModel(
   } catch (err) {
     console.warn(`world model ingest for org ${orgId} failed: ${(err as Error).message}`);
   }
+}
+
+/**
+ * Reads a contract's renewal date and yearly value and, where they differ from the company's,
+ * proposes setting them (an "update company" action in Approvals). Never twice for the same terms.
+ */
+async function proposeContractTerms(
+  prisma: PrismaClient,
+  model: ChatModel,
+  ctx: { orgId: string; account: { id: string; name: string }; item: { id: string; title: string | null; content: string } },
+) {
+  const today = new Date().toISOString().slice(0, 10);
+  const { terms } = await readContractTerms(model, { title: ctx.item.title, content: ctx.item.content, accountName: ctx.account.name, today });
+  if (!terms) return;
+  const current = await prisma.account.findUniqueOrThrow({
+    where: { id: ctx.account.id },
+    select: { renewalDate: true, annualValueCents: true, currency: true },
+  });
+  const renewalDiffers = terms.renewalDate !== null && terms.renewalDate !== current.renewalDate?.toISOString().slice(0, 10);
+  const valueDiffers =
+    terms.annualValue !== null && (current.annualValueCents === null || BigInt(Math.round(terms.annualValue * 100)) !== current.annualValueCents);
+  if (!renewalDiffers && !valueDiffers) return;
+
+  const payload: AccountUpdatePayload = {
+    renewalDate: renewalDiffers ? terms.renewalDate : null,
+    annualValue: valueDiffers ? String(terms.annualValue) : null,
+    currency: valueDiffers ? (terms.currency ?? current.currency ?? null) : null,
+    noticeDays: terms.noticeDays,
+    documentTitle: ctx.item.title ?? "a contract",
+    excerpt: terms.excerpt,
+  };
+  const waiting = await prisma.proposedAction.findMany({
+    where: { orgId: ctx.orgId, accountId: ctx.account.id, type: "update_account", status: { in: ["pending", "rejected", "done"] } },
+    select: { payload: true },
+  });
+  const same = (p: unknown) => {
+    const q = p as AccountUpdatePayload;
+    return q.renewalDate === payload.renewalDate && q.annualValue === payload.annualValue && q.currency === payload.currency;
+  };
+  if (waiting.some((w) => same(w.payload))) return;
+
+  const parts = [
+    payload.renewalDate && `renewal date ${payload.renewalDate}`,
+    payload.annualValue && `contract value ${payload.annualValue}${payload.currency ? ` ${payload.currency}` : ""} a year`,
+  ].filter(Boolean);
+  await prisma.proposedAction.create({
+    data: {
+      orgId: ctx.orgId,
+      accountId: ctx.account.id,
+      type: "update_account",
+      payload: payload as unknown as Prisma.InputJsonValue,
+      rationale: `"${payload.documentTitle}" states the ${parts.join(" and ")}${terms.noticeDays ? `, with ${terms.noticeDays} days' notice to cancel` : ""}.`,
+    },
+  });
 }

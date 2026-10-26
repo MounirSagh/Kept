@@ -2,12 +2,13 @@ import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { createPrismaClient } from "@kept/db";
 import { connectorConfig } from "@kept/connectors";
-import { openAIChatModel } from "@kept/agents";
+import { openAIChatModel, openAITranscriber } from "@kept/agents";
 import {
-  ACTION_QUEUE, AGENT_RUN_QUEUE, EMAIL_QUEUE, EXTRACT_QUEUE, LEARN_QUEUE, MATCH_QUEUE, SOURCE_SYNC_QUEUE,
+  ACTION_QUEUE, AGENT_RUN_QUEUE, DAILY_QUEUE, EMAIL_QUEUE, EXTRACT_QUEUE, LEARN_QUEUE, MATCH_QUEUE, SOURCE_SYNC_QUEUE,
   type ActionJobData, type AgentRunJobData, type EmailJobData, type ExtractJobData, type LearnJobData,
   type MatchJobData, type SourceSyncJobData,
 } from "@kept/shared";
+import { createDailyProcessor } from "./agents/daily.js";
 import { createActionProcessor } from "./agents/execute.js";
 import { createExtractProcessor } from "./agents/extract.js";
 import { createLearnProcessor } from "./agents/memory.js";
@@ -21,6 +22,8 @@ const prisma = createPrismaClient(env.DATABASE_URL);
 const connection = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
 
 const model = env.OPENAI_API_KEY ? openAIChatModel({ apiKey: env.OPENAI_API_KEY }) : null;
+// OCR for scanned documents and images (only those routed to a client).
+const transcriber = env.OPENAI_API_KEY ? openAITranscriber({ apiKey: env.OPENAI_API_KEY }) : null;
 if (!model) console.warn("OPENAI_API_KEY not set: extraction and agent runs will wait until it is");
 
 const agentRunQueue = new Queue<AgentRunJobData>(AGENT_RUN_QUEUE, {
@@ -89,7 +92,7 @@ matchWorker.on("failed", (job, err) => console.error(`matching org ${job?.data.o
 // One org at a time per worker slot; model calls dominate, and their rate limits are per API key.
 const extractWorker = new Worker<ExtractJobData>(
   EXTRACT_QUEUE,
-  createExtractProcessor({ prisma, model, extractQueue, agentRunQueue }),
+  createExtractProcessor({ prisma, model, extractQueue, agentRunQueue, config: connectors, transcriber }),
   { connection, concurrency: 2, lockDuration: 10 * 60 * 1000 },
 );
 extractWorker.on("ready", () => console.log(`worker listening on queue "${EXTRACT_QUEUE}"`));
@@ -109,10 +112,25 @@ const learnWorker = new Worker<LearnJobData>(LEARN_QUEUE, createLearnProcessor(p
 learnWorker.on("ready", () => console.log(`worker listening on queue "${LEARN_QUEUE}"`));
 learnWorker.on("failed", (job, err) => console.error(`learning for org ${job?.data.orgId} failed: ${err.message}`));
 
+// Hourly: each org's daily sweep and digests go out once per local day (see agents/daily.ts).
+const dailyQueue = new Queue(DAILY_QUEUE, { connection });
+await dailyQueue.upsertJobScheduler("daily-tick", { every: 60 * 60 * 1000 }, { name: "tick", opts: { removeOnComplete: 100, removeOnFail: 100 } });
+const dailyWorker = new Worker(
+  DAILY_QUEUE,
+  createDailyProcessor({ prisma, agentRunQueue, emailQueue, webOrigin: env.WEB_ORIGIN }),
+  { connection, concurrency: 1 },
+);
+dailyWorker.on("ready", () => console.log(`worker listening on queue "${DAILY_QUEUE}"`));
+dailyWorker.on("completed", (_job, result) => {
+  const r = result as { sweepRuns: number; digests: number };
+  if (r.sweepRuns || r.digests) console.log(`daily: ${JSON.stringify(result)}`);
+});
+dailyWorker.on("failed", (_job, err) => console.error(`daily tick failed: ${err.message}`));
+
 async function shutdown(signal: string) {
   console.log(`${signal} received, shutting down`);
-  await Promise.all([worker.close(), emailWorker.close(), syncWorker.close(), matchWorker.close(), extractWorker.close(), actionWorker.close(), learnWorker.close()]);
-  await Promise.all([sourceSyncQueue.close(), matchQueue.close(), extractQueue.close(), emailQueue.close(), agentRunQueue.close()]);
+  await Promise.all([worker.close(), emailWorker.close(), syncWorker.close(), matchWorker.close(), extractWorker.close(), actionWorker.close(), learnWorker.close(), dailyWorker.close()]);
+  await Promise.all([sourceSyncQueue.close(), matchQueue.close(), extractQueue.close(), emailQueue.close(), agentRunQueue.close(), dailyQueue.close()]);
   await connection.quit();
   await prisma.$disconnect();
   process.exit(0);

@@ -1,31 +1,16 @@
-import type { Account, Prisma } from "@kept/db";
+import { visibleAccountsWhere as sharedVisibleAccountsWhere, type Account, type Prisma } from "@kept/db";
 import {
   CRM_SYNCED_FIELDS, can,
-  type AccountDto, type AccountImportRow, type AccountInput, type CompaniesQuery, type ImportResultDto, type PageDto,
+  type AccountDto, type AccountImportRow, type AccountInput, type CompaniesQuery, type DocumentDto, type ImportResultDto, type PageDto,
 } from "@kept/shared";
 import { HttpError } from "../lib/http-error.js";
 import { prisma } from "../lib/prisma.js";
 import { rematchOrg } from "../lib/queues.js";
 import type { OrgActor } from "../types/express.js";
 
-/**
- * Which accounts an actor may see:
- * - owners and platform admins: every account in the org
- * - managers: accounts they own or were added to, plus accounts owned by anyone on their team
- * - members: accounts they own or were added to
- */
+/** Which accounts an actor may see; the rule is shared with the worker (packages/db/src/rules.ts). */
 export function visibleAccountsWhere(actor: OrgActor): Prisma.AccountWhereInput {
-  const base = { orgId: actor.orgId, deletedAt: null };
-  if (actor.isPlatformAdmin || actor.role === "owner") return base;
-
-  const reachable: Prisma.AccountWhereInput[] = [
-    { ownerUserId: actor.userId },
-    { members: { some: { userId: actor.userId } } },
-  ];
-  if (actor.role === "manager" && actor.teamId !== null) {
-    reachable.push({ owner: { memberships: { some: { orgId: actor.orgId, teamId: actor.teamId } } } });
-  }
-  return { ...base, OR: reachable };
+  return sharedVisibleAccountsWhere(actor);
 }
 
 /** Contacts still active, counted with each account. */
@@ -275,4 +260,40 @@ export async function importAccounts(actor: OrgActor, rows: (AccountImportRow & 
   }
   if (result.created + result.updated > 0) await rematchOrg(actor.orgId);
   return result;
+}
+
+/** Where a document item came from, in words. */
+function documentOrigin(externalId: string, provider: string): string {
+  if (externalId.startsWith("gmail:")) return "Gmail attachment";
+  if (externalId.startsWith("mail:")) return "Outlook attachment";
+  if (externalId.startsWith("slack-file:")) return "Slack";
+  if (externalId.startsWith("msfile:")) return "SharePoint or OneDrive";
+  if (externalId.startsWith("file:")) return "OneDrive";
+  if (externalId.startsWith("gdrive:")) return "Google Drive";
+  return provider;
+}
+
+/** Files routed to a company, newest first: attachments, shared files, files linked from conversations. */
+export async function listAccountDocuments(actor: OrgActor, accountId: string): Promise<DocumentDto[]> {
+  if (!(await canSeeAccount(actor, accountId))) throw new HttpError(404, "Not found");
+  const docs = await prisma.sourceItem.findMany({
+    where: { AND: [visibleSourceItemsWhere(actor), { accountId, kind: "document", matchStatus: "matched" }] },
+    select: { id: true, title: true, url: true, externalId: true, occurredAt: true, metadata: true, matchReason: true, connection: { select: { provider: true } } },
+    orderBy: { occurredAt: "desc" },
+    take: 100,
+  });
+  return docs.map((d) => {
+    const meta = (d.metadata ?? {}) as { contentStatus?: string; pages?: number | null };
+    return {
+      id: d.id,
+      title: d.title,
+      url: d.url,
+      origin: documentOrigin(d.externalId, d.connection.provider),
+      occurredAt: d.occurredAt.toISOString(),
+      // Files synced before documents were read have no status: their text was read at sync.
+      status: meta.contentStatus ?? "read",
+      pages: meta.pages ?? null,
+      reason: d.matchReason,
+    };
+  });
 }

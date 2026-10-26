@@ -4,12 +4,15 @@ import {
   flagDedupeKey, normalizeForMatch, runAccountAgents, truncate,
   type AccountContext, type ChatModel, type InvestigationTools, type SourceDoc, type StepRecord,
 } from "@kept/agents";
-import type { AgentRunJobData, AlertPayload, ReminderPayload, SendEmailPayload } from "@kept/shared";
+import { canAct } from "@kept/connectors";
+import type { ActionPayload, AgentRunJobData, CrmTaskPayload, ReminderPayload, SendEmailPayload, TicketPayload } from "@kept/shared";
 import { recallForAccount } from "./memory.js";
+import { accountHistory, openWorld, syncAccountWorld } from "./world.js";
 
 const COMMITMENT_LIMIT = 60;
 const RECENT_LIMIT = 8;
 const CONTACT_LIMIT = 30;
+const LINEAR_TEAM_LIMIT = 10;
 /** Closed items stay in context this long, so the agents can see what was just delivered or missed. */
 const RECENTLY_CLOSED_DAYS = 30;
 
@@ -125,6 +128,8 @@ export async function loadAccountContext(prisma: PrismaClient, orgId: string, ac
     [account.name, ...commitments.slice(0, 10).map((c) => c.summary)].join(". "),
   );
 
+  const [tools, history] = await Promise.all([actionTools(prisma, orgId, accountId, account.crmExternalId), worldHistory(prisma, orgId, accountId)]);
+
   return {
     today: day(new Date())!,
     org: { name: org.name, emailSignature: profile?.emailSignature?.trim() || null },
@@ -160,7 +165,57 @@ export async function loadAccountContext(prisma: PrismaClient, orgId: string, ac
     openFlags,
     pendingActions: pending.map((a) => describeAction(a.type, a.payload)),
     memories,
+    history,
+    tools,
   };
+}
+
+/**
+ * Where Kept may act for this account: Linear teams seen in synced issues (those routed to this
+ * account first), and the company's HubSpot record, each only with a connection allowed to write.
+ */
+export async function actionTools(prisma: PrismaClient, orgId: string, accountId: string, crmExternalId: string | null): Promise<AccountContext["tools"]> {
+  const connections = await prisma.connection.findMany({
+    where: { orgId, provider: { in: ["linear", "hubspot"] }, status: "active" },
+    select: { id: true, provider: true, scopes: true },
+  });
+  const linear = connections.filter((c) => c.provider === "linear" && canAct(c.provider, c.scopes)).map((c) => c.id);
+  const crmTasks = !!crmExternalId && /^hubspot:\d+$/.test(crmExternalId) && connections.some((c) => c.provider === "hubspot" && canAct(c.provider, c.scopes));
+  if (linear.length === 0) return { linearTeams: [], crmTasks };
+
+  const [teams, mapped] = await Promise.all([
+    prisma.sourceItem.groupBy({
+      by: ["containerId", "containerLabel"],
+      where: { orgId, connectionId: { in: linear }, deletedAt: null, containerId: { not: null } },
+      _max: { occurredAt: true },
+    }),
+    prisma.sourceMapping.findMany({ where: { orgId, connectionId: { in: linear }, accountId }, select: { containerId: true } }),
+  ]);
+  const ours = new Set(mapped.map((m) => m.containerId));
+  const byKey = new Map<string, { key: string; name: string; ours: boolean; last: number }>();
+  for (const t of teams) {
+    const key = t.containerId!;
+    const last = t._max.occurredAt?.getTime() ?? 0;
+    const prev = byKey.get(key);
+    if (!prev || prev.last < last) byKey.set(key, { key, name: t.containerLabel ?? key, ours: ours.has(key), last });
+  }
+  const linearTeams = [...byKey.values()]
+    .sort((a, b) => Number(b.ours) - Number(a.ours) || b.last - a.last)
+    .slice(0, LINEAR_TEAM_LIMIT)
+    .map(({ key, name }) => ({ key, name }));
+  return { linearTeams, crmTasks };
+}
+
+/** Brings the World Model up to date with the account, then reads its history. Best effort. */
+async function worldHistory(prisma: PrismaClient, orgId: string, accountId: string): Promise<string[]> {
+  try {
+    const wm = await openWorld(prisma, orgId);
+    await syncAccountWorld(wm, prisma, orgId, accountId);
+    return accountHistory(wm, accountId);
+  } catch (err) {
+    console.warn(`world model for account ${accountId} failed: ${(err as Error).message}`);
+    return [];
+  }
 }
 
 /** One line per waiting action, so the advisor doesn't propose it again. */
@@ -168,6 +223,9 @@ function describeAction(type: string, payload: Prisma.JsonValue): string {
   const p = (payload ?? {}) as Record<string, unknown>;
   if (type === "send_email") return `Email to ${(p.to as string[] | undefined)?.join(", ")}: "${p.subject}"`;
   if (type === "schedule_reminder") return `Reminder on ${p.remindOn}: ${p.title}`;
+  if (type === "create_ticket") return `Linear issue in ${p.teamKey}: "${p.title}"`;
+  if (type === "update_crm") return `HubSpot task due ${p.dueDate}: "${p.subject}"`;
+  if (type === "update_account") return `Company update from ${p.documentTitle}`;
   return `Team alert: ${truncate(String(p.message ?? ""), 160)}`;
 }
 
@@ -341,9 +399,11 @@ async function saveProposals(
   for (const a of result.actions) {
     if (a.flag !== null && flagIds[a.flag] === null) continue;
     const flagId = a.flag !== null ? flagIds[a.flag]! : null;
-    const payload: SendEmailPayload | ReminderPayload | AlertPayload =
+    const payload: ActionPayload =
       a.type === "send_email" ? { to: a.to, subject: a.subject, body: a.body }
       : a.type === "schedule_reminder" ? { title: a.title, remindOn: a.remindOn }
+      : a.type === "create_ticket" ? ({ teamKey: a.teamKey, title: a.title, description: a.description } satisfies TicketPayload)
+      : a.type === "update_crm" ? ({ subject: a.subject, body: a.body, dueDate: a.dueDate } satisfies CrmTaskPayload)
       : { message: a.message };
 
     const waiting = await prisma.proposedAction.findMany({
@@ -352,6 +412,12 @@ async function saveProposals(
     });
     const recipients = (p: unknown) => [...((p as SendEmailPayload).to ?? [])].sort().join(",");
     if (a.type === "schedule_reminder" && waiting.some((w) => (w.payload as unknown as ReminderPayload).remindOn === a.remindOn)) continue;
+    // One issue or CRM task per flag, or per title when it isn't about a flag.
+    const titleOf = (p: unknown) => String((p as { title?: string; subject?: string }).title ?? (p as { subject?: string }).subject ?? "").trim().toLowerCase();
+    if (
+      (a.type === "create_ticket" || a.type === "update_crm") &&
+      waiting.some((w) => (flagId !== null && w.flagId === flagId) || titleOf(w.payload) === titleOf(payload))
+    ) continue;
     // A newer email to the same people about the same flag, or a newer alert about it, knows more:
     // it replaces the waiting one. Emails about different issues stay separate.
     const superseded = waiting.filter((w) =>

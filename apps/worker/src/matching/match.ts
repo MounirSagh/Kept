@@ -1,9 +1,11 @@
 // Deterministic routing of a synced item to a client account. No model calls: every result
 // comes from an explicit rule and carries the reason, so "why can my team see this?" always
 // has an answer. Rules, in order:
-//   1. An owner's mapping of the item's container (Slack channel, Linear team, Notion parent).
+//   1. The mapping of the item's container (Slack channel, Linear team, Notion parent, folder):
+//      an owner's, or Kept's automatic one (see auto.ts).
 //   2. HubSpot records: companies are accounts; contacts follow their company.
-//   3. Participants: a known contact's email, else an account's email domain.
+//   3. Participants: a known contact's email, else an account's email domain. For files, the people
+//      and domains they're shared with count as participants.
 // One account -> matched. Several -> ambiguous (owners review). None -> unmatched.
 
 export type MatchStatus = "matched" | "unmatched" | "ambiguous" | "ignored";
@@ -24,7 +26,7 @@ export interface MatchContext {
   /** CRM key ("hubspot:123") -> account id. */
   accountsByCrmId: Map<string, string>;
   /** `${connectionId}:${containerId}` -> owner decision. */
-  mappings: Map<string, { accountId: string | null; ignored: boolean; label: string | null }>;
+  mappings: Map<string, { accountId: string | null; ignored: boolean; label: string | null; auto?: boolean }>;
 }
 
 export interface MatchInput {
@@ -52,7 +54,7 @@ const EMAIL = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 /** Every email address in the item's participant fields (from, to, cc, attendees, organizer, author). */
 export function participantEmails(input: Pick<MatchInput, "author" | "metadata">): string[] {
   const values: unknown[] = [input.author];
-  for (const key of ["from", "to", "cc", "attendees", "organizer", "modifiedBy"]) values.push(input.metadata[key]);
+  for (const key of ["from", "to", "cc", "attendees", "organizer", "modifiedBy", "sharedWith", "authorEmail"]) values.push(input.metadata[key]);
   const out = new Set<string>();
   const visit = (v: unknown) => {
     if (typeof v === "string") for (const m of v.matchAll(EMAIL)) out.add(m[0].toLowerCase());
@@ -94,7 +96,9 @@ export function matchItem(input: MatchInput, ctx: MatchContext): MatchResult {
     const mapping = ctx.mappings.get(`${input.connectionId}:${input.containerId}`);
     const label = mapping?.label ?? input.containerLabel ?? input.containerId;
     if (mapping?.ignored) return { status: "ignored", accountId: null, reason: `${label} is marked as not client-related` };
-    if (mapping?.accountId) return { status: "matched", accountId: mapping.accountId, reason: `${label} is mapped to this account` };
+    if (mapping?.accountId) {
+      return { status: "matched", accountId: mapping.accountId, reason: mapping.auto ? `${label} is routed to this account automatically` : `${label} is mapped to this account` };
+    }
   }
 
   // 2. HubSpot records carry their own CRM identity.
@@ -121,6 +125,13 @@ export function matchItem(input: MatchInput, ctx: MatchContext): MatchResult {
     const domain = email.split("@")[1]!;
     if (FREE_MAIL_DOMAINS.has(domain) || isInternal(domain, ctx)) continue;
     for (const accountId of accountsForDomain(domain, ctx)) if (!byDomain.has(accountId)) byDomain.set(accountId, `email domain ${domain}`);
+  }
+  // A file shared with a whole domain ("anyone at northwind.com").
+  const sharedDomains = Array.isArray(input.metadata.sharedWithDomains) ? (input.metadata.sharedWithDomains as string[]) : [];
+  for (const raw of sharedDomains) {
+    const domain = normalizeDomain(raw);
+    if (FREE_MAIL_DOMAINS.has(domain) || isInternal(domain, ctx)) continue;
+    for (const accountId of accountsForDomain(domain, ctx)) if (!byDomain.has(accountId)) byDomain.set(accountId, `shared with ${domain}`);
   }
   const result = decide(byDomain, "email domains");
   if (result.status !== "unmatched") return result;

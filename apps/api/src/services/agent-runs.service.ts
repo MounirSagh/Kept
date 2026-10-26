@@ -26,6 +26,11 @@ export async function createAgentRun(actor: OrgActor, input: CreateAgentRunInput
   if (input.accountId && !(await canSeeAccount(actor, input.accountId))) {
     throw new HttpError(404, "Account not found");
   }
+  // A review of the company already waiting or running covers this request.
+  if (input.accountId) {
+    const active = await prisma.agentRun.findFirst({ where: { orgId: actor.orgId, accountId: input.accountId, status: { in: ["queued", "running"] } } });
+    if (active) return active;
+  }
   const run = await prisma.agentRun.create({
     data: { ...input, orgId: actor.orgId, requestedById: actor.userId },
   });

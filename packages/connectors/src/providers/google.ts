@@ -95,20 +95,31 @@ type GmailCursor =
   | { phase: "backfill"; pageToken?: string; startHistoryId: string }
   | { phase: "history"; historyId: string; pageToken?: string };
 
+/** Messages fetched at once: each costs 5 of Gmail's per-user quota units, counted per minute. */
+const GMAIL_CONCURRENCY = 5;
+
 async function fetchMessages(client: ApiClient, ids: string[]): Promise<SourceItemInput[]> {
-  const messages = await Promise.all(
-    ids.map((id) =>
-      client
-        .json<GmailMessage>(`/gmail/v1/users/me/messages/${id}`, { query: { format: "full" } })
-        .catch((err: unknown) => {
-          // Deleted between listing and fetching.
-          if (err instanceof ApiError && err.status === 404) return null;
-          throw err;
-        }),
-    ),
-  );
+  const messages: (GmailMessage | null)[] = [];
+  for (let i = 0; i < ids.length; i += GMAIL_CONCURRENCY) {
+    const batch = await Promise.all(
+      ids.slice(i, i + GMAIL_CONCURRENCY).map((id) =>
+        client
+          .json<GmailMessage>(`/gmail/v1/users/me/messages/${id}`, { query: { format: "full" } })
+          .catch((err: unknown) => {
+            // Deleted between listing and fetching.
+            if (err instanceof ApiError && err.status === 404) return null;
+            throw err;
+          }),
+      ),
+    );
+    messages.push(...batch);
+  }
   return messages.filter((m): m is GmailMessage => !!m).flatMap(mapGmail);
 }
+
+/** Gmail's tabs for newsletters, social networks and mailing lists: never a conversation with a client. */
+const SKIPPED_CATEGORIES = ["CATEGORY_PROMOTIONS", "CATEGORY_SOCIAL", "CATEGORY_FORUMS"];
+const SKIP_QUERY = "-category:promotions -category:social -category:forums";
 
 /** Backfills the window with a search, then follows the history API from where the backfill began. */
 const gmailStream: Stream = {
@@ -123,14 +134,14 @@ const gmailStream: Stream = {
     if (cursor.phase === "backfill") {
       const after = Math.floor(ctx.since.getTime() / 1000);
       const page = await client.json<{ messages?: { id: string }[]; nextPageToken?: string }>("/gmail/v1/users/me/messages", {
-        query: { q: `after:${after}`, maxResults: 25, pageToken: cursor.pageToken },
+        query: { q: `after:${after} ${SKIP_QUERY}`, maxResults: 25, pageToken: cursor.pageToken },
       });
       const items = await fetchMessages(client, (page.messages ?? []).map((m) => m.id));
       if (page.nextPageToken) return { items, cursor: { ...cursor, pageToken: page.nextPageToken }, more: true };
       return { items, cursor: { phase: "history", historyId: cursor.startHistoryId }, more: true };
     }
 
-    let page: { history?: { messagesAdded?: { message: { id: string } }[] }[]; nextPageToken?: string; historyId?: string };
+    let page: { history?: { messagesAdded?: { message: { id: string; labelIds?: string[] } }[] }[]; nextPageToken?: string; historyId?: string };
     try {
       page = await client.json("/gmail/v1/users/me/history", {
         query: { startHistoryId: cursor.historyId, historyTypes: "messageAdded", maxResults: 100, pageToken: cursor.pageToken },
@@ -140,7 +151,14 @@ const gmailStream: Stream = {
       if (err instanceof ApiError && err.status === 404) return { items: [], cursor: undefined, more: true };
       throw err;
     }
-    const ids = [...new Set((page.history ?? []).flatMap((h) => (h.messagesAdded ?? []).map((a) => a.message.id)))];
+    // History carries each message's labels, so newsletters are skipped before they're fetched.
+    const ids = [
+      ...new Set(
+        (page.history ?? []).flatMap((h) =>
+          (h.messagesAdded ?? []).filter((a) => !a.message.labelIds?.some((l) => SKIPPED_CATEGORIES.includes(l))).map((a) => a.message.id),
+        ),
+      ),
+    ];
     const items = await fetchMessages(client, ids);
     if (page.nextPageToken) return { items, cursor: { ...cursor, pageToken: page.nextPageToken }, more: true };
     return { items, cursor: { phase: "history", historyId: page.historyId ?? cursor.historyId }, more: false };
@@ -152,6 +170,8 @@ const gmailStream: Stream = {
 interface GEvent {
   id: string;
   status?: string;
+  /** "default" for meetings; Google also creates birthdays, working locations, focus time and out-of-office. */
+  eventType?: string;
   summary?: string;
   description?: string;
   htmlLink?: string;
@@ -165,6 +185,11 @@ interface GEvent {
 
 type CalendarCursor = { phase: "backfill" | "updates"; pageToken?: string; watermark: string; maxSeen?: string };
 
+/** Meetings planned this far ahead are read; without a limit a recurring event repeats for decades. */
+const CALENDAR_AHEAD_MS = 180 * 24 * 60 * 60 * 1000;
+/** Entries Google adds by itself: never a meeting with anyone. */
+const SKIPPED_EVENT_TYPES = new Set(["birthday", "workingLocation", "focusTime", "outOfOffice"]);
+
 /**
  * Backfill by event time (Google rejects an updatedMin that is too old), then follow
  * changes with updatedMin from the moment the backfill started.
@@ -175,7 +200,14 @@ const calendarStream: Stream = {
     const cursor: CalendarCursor = (raw as CalendarCursor | undefined) ?? { phase: "backfill", watermark: ctx.now.toISOString() };
     const query =
       cursor.phase === "backfill"
-        ? { timeMin: ctx.since.toISOString(), singleEvents: true, orderBy: "startTime", maxResults: 100, pageToken: cursor.pageToken }
+        ? {
+            timeMin: ctx.since.toISOString(),
+            timeMax: new Date(ctx.now.getTime() + CALENDAR_AHEAD_MS).toISOString(),
+            singleEvents: true,
+            orderBy: "startTime",
+            maxResults: 100,
+            pageToken: cursor.pageToken,
+          }
         : { updatedMin: cursor.watermark, orderBy: "updated", showDeleted: false, maxResults: 100, pageToken: cursor.pageToken };
     const page = await client.json<{ items?: GEvent[]; nextPageToken?: string }>("/calendar/v3/calendars/primary/events", { query });
 
@@ -183,7 +215,7 @@ const calendarStream: Stream = {
     const items: SourceItemInput[] = [];
     for (const e of page.items ?? []) {
       if (e.updated && (!maxSeen || e.updated > maxSeen)) maxSeen = e.updated;
-      if (e.status === "cancelled") continue;
+      if (e.status === "cancelled" || SKIPPED_EVENT_TYPES.has(e.eventType ?? "default")) continue;
       const participants = { organizer: e.organizer?.email, attendees: (e.attendees ?? []).map((a) => a.email).filter(Boolean) };
       // Agendas and decks attached to the meeting: Drive files, routed by the meeting's attendees.
       for (const a of e.attachments ?? []) {

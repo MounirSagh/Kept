@@ -63,13 +63,13 @@ describe("Google Workspace", () => {
   });
   const routes = [
     { match: ["/gmail/v1/users/me/profile"], json: { historyId: "100" } },
-    { match: ["/gmail/v1/users/me/messages?", "q=after:1783814400"], json: { messages: [{ id: "g1" }, { id: "g2" }] } },
+    { match: ["/gmail/v1/users/me/messages?", "q=after:1783814400 -category:promotions -category:social -category:forums"], json: { messages: [{ id: "g1" }, { id: "g2" }] } },
     { match: ["/gmail/v1/users/me/messages/g1"], json: gmail("g1", "Renewal") },
     { match: ["/gmail/v1/users/me/messages/g2"], json: gmail("g2", "Draft", ["DRAFT"]) },
     { match: ["/gmail/v1/users/me/messages/g3"], json: gmail("g3", "New", ["INBOX", "SENT"]) },
-    { match: ["/gmail/v1/users/me/history", "startHistoryId=100"], json: { history: [{ messagesAdded: [{ message: { id: "g3" } }] }], historyId: "150" } },
+    { match: ["/gmail/v1/users/me/history", "startHistoryId=100"], json: { history: [{ messagesAdded: [{ message: { id: "g3" } }, { message: { id: "promo", labelIds: ["INBOX", "CATEGORY_PROMOTIONS"] } }] }], historyId: "150" } },
     { match: ["/gmail/v1/users/me/history", "startHistoryId=150"], json: { historyId: "150" } },
-    { match: ["/calendar/v3/calendars/primary/events", "timeMin="], json: { items: [{ id: "c1", summary: "QBR", updated: "2026-10-05T00:00:00Z", start: { dateTime: "2026-10-20T15:00:00Z" } }] } },
+    { match: ["/calendar/v3/calendars/primary/events", "timeMin=", "timeMax=2027-04-08"], json: { items: [{ id: "c1", summary: "QBR", updated: "2026-10-05T00:00:00Z", start: { dateTime: "2026-10-20T15:00:00Z" } }, { id: "bday", summary: "Joyeux anniversaire !", eventType: "birthday", updated: "2026-10-05T00:00:00Z", start: { date: "2027-09-30" } }] } },
     { match: ["/calendar/v3/calendars/primary/events", "updatedMin=2026-10-10T00:00:00.000Z"], json: { items: [{ id: "c2", summary: "Moved", updated: "2026-10-10T05:00:00Z", start: { date: "2026-10-21" } }] } },
     { match: ["/calendar/v3/calendars/primary/events", "updatedMin=2026-10-10T05:00:00Z"], json: { items: [] } },
     { match: ["/drive/v3/files/doc1/export"], text: "Statement of work: SSO by Nov 1" },
@@ -203,8 +203,33 @@ describe("Notion", () => {
     expect(first.items.map((i) => i.title)).toEqual(["Plan p2", "Plan p1"]);
     expect(first.items[0]!.contentText).toBe("Deliver SSO\n[x] Send QBR deck");
     expect(f.calls[0]!.headers["Notion-Version"]).toBe("2022-06-28");
-    expect(first.state.pages?.cursor).toEqual({ watermark: "2026-10-05T00:00:00.000Z" });
+    expect(first.state.pages?.cursor).toMatchObject({ watermark: "2026-10-05T00:00:00.000Z" });
     expect((await sync(PROVIDERS.notion, fakeFetch(routes).fetch, first.state)).items).toEqual([]);
+  });
+
+  it("labels a page's container with its parent's title, so a client's page routes by name", async () => {
+    const page = (id: string, title: string, parent: Record<string, unknown>) => ({
+      id, last_edited_time: "2026-10-05T00:00:00.000Z", parent, properties: { Name: { type: "title", title: [{ plain_text: title }] } },
+    });
+    const f = fakeFetch([
+      {
+        method: "POST", match: ["/v1/search"], json: { has_more: false, results: [
+          page("qbr", "QBR notes", { type: "page_id", page_id: "client" }),
+          page("client", "Halcyon Freight", { type: "workspace", workspace: true }),
+          page("roadmap", "Roadmap", { type: "database_id", database_id: "db1" }),
+          page("secret", "Notes", { type: "page_id", page_id: "hidden" }),
+        ] },
+      },
+      { match: ["/v1/blocks/"], json: { results: [] } },
+      { match: ["/v1/databases/db1"], json: { title: [{ plain_text: "Client plans" }] } },
+      { match: ["/v1/pages/hidden"], status: 404, json: { message: "not shared" } },
+    ]);
+    const { items } = await sync(PROVIDERS.notion, f.fetch);
+    expect(items.map((i) => i.container?.label)).toEqual([
+      "Notion › Halcyon Freight", "Notion › Workspace (top level)", "Notion › Client plans", "page hidden",
+    ]);
+    // The parent shared with Kept is named from the same search page: no lookup.
+    expect(f.calls.some((c) => c.url.includes("/v1/pages/client"))).toBe(false);
   });
 });
 

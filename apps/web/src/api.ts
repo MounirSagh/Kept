@@ -133,6 +133,9 @@ export function useApi() {
       contactsPage: (orgId: string, query: Record<string, string | number>) =>
         request<PageDto<ContactRowDto>>(`/orgs/${orgId}/contacts?${new URLSearchParams(Object.entries(query).map(([k, v]) => [k, String(v)]))}`),
       accountDocuments: (orgId: string, accountId: string) => request<DocumentDto[]>(`/orgs/${orgId}/accounts/${accountId}/documents`),
+      /** Starts the agents' review of one company now (or joins the one already waiting). */
+      reviewAccount: (orgId: string, accountId: string) =>
+        request<{ id: string }>(`/orgs/${orgId}/agent-runs`, { method: "POST", body: JSON.stringify({ accountId, trigger: "manual" }) }),
       contacts: (orgId: string, accountId: string) => request<ContactDto[]>(`/orgs/${orgId}/accounts/${accountId}/contacts`),
       createContact: (orgId: string, accountId: string, input: ContactInput) =>
         request<ContactDto>(`/orgs/${orgId}/accounts/${accountId}/contacts`, { method: "POST", body: JSON.stringify(input) }),

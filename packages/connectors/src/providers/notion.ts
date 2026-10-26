@@ -21,13 +21,29 @@ interface Page {
 
 const plain = (rt?: RichText) => (rt ?? []).map((t) => t.plain_text ?? "").join("");
 
-/** The page's parent (page, database or workspace): the unit owners map to an account. */
-function parentContainer(page: Page): { id: string; label: string } {
+/** Titles of parent pages and databases, kept in the cursor so each is looked up once. */
+const MAX_TITLES = 500;
+
+/**
+ * The page's parent (page, database or workspace): the unit owners map to an account. It's labeled
+ * with the parent's title ("Notion › Halcyon Freight"), so a client's page can be routed by its name.
+ */
+async function parentContainer(client: ApiClient, page: Page, titles: Record<string, string>): Promise<{ id: string; label: string }> {
   const parent = page.parent ?? {};
   const type = String(parent.type ?? "workspace");
   const id = typeof parent[type] === "string" ? (parent[type] as string) : type;
-  const label = type === "workspace" ? "Workspace (top level)" : `${type.replace("_id", "").replace("_", " ")} ${id.slice(0, 8)}`;
-  return { id: `${type}:${id}`, label };
+  if (type === "workspace") return { id: `${type}:${id}`, label: "Notion › Workspace (top level)" };
+  if (!(id in titles) && (type === "page_id" || type === "database_id")) {
+    try {
+      if (type === "page_id") titles[id] = pageTitle(await client.json<Page>(`/v1/pages/${id}`));
+      else titles[id] = plain((await client.json<{ title?: RichText }>(`/v1/databases/${id}`)).title) || "Untitled";
+    } catch {
+      // Not shared with Kept: the id stands in for the name.
+      titles[id] = "";
+    }
+  }
+  const title = titles[id];
+  return { id: `${type}:${id}`, label: title ? `Notion › ${title}` : `${type.replace("_id", "").replace("_", " ")} ${id.slice(0, 8)}` };
 }
 
 function pageTitle(page: Page): string {
@@ -57,7 +73,7 @@ async function pageText(client: ApiClient, pageId: string): Promise<string> {
     .join("\n");
 }
 
-type PagesCursor = { watermark?: string; startCursor?: string; maxSeen?: string };
+type PagesCursor = { watermark?: string; startCursor?: string; maxSeen?: string; titles?: Record<string, string> };
 
 /** Notion's search sorts by last edit, newest first: page until reaching already-synced edits. */
 const pagesStream: Stream = {
@@ -77,6 +93,8 @@ const pagesStream: Stream = {
     let maxSeen = cursor.maxSeen;
     let reachedSynced = false;
     const items: SourceItemInput[] = [];
+    const titles = { ...(cursor.titles ?? {}) };
+    for (const page of res.results) titles[page.id] = pageTitle(page);
     for (const page of res.results) {
       if (page.last_edited_time <= watermark) {
         reachedSynced = true;
@@ -93,13 +111,14 @@ const pagesStream: Stream = {
         occurredAt: date(page.last_edited_time),
         contentText: clip(await pageText(client, page.id)),
         metadata: { createdAt: page.created_time, parent: page.parent },
-        container: parentContainer(page),
+        container: await parentContainer(client, page, titles),
       });
     }
+    const kept = Object.fromEntries(Object.entries(titles).slice(-MAX_TITLES));
     if (!reachedSynced && res.has_more && res.next_cursor) {
-      return { items, cursor: { watermark, startCursor: res.next_cursor, maxSeen }, more: true };
+      return { items, cursor: { watermark, startCursor: res.next_cursor, maxSeen, titles: kept }, more: true };
     }
-    return { items, cursor: { watermark: maxSeen ?? watermark }, more: false };
+    return { items, cursor: { watermark: maxSeen ?? watermark, titles: kept }, more: false };
   },
 };
 

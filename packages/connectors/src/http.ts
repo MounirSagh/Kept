@@ -1,5 +1,5 @@
 // HTTP client shared by every connector: bearer auth, one token refresh on 401,
-// and retries with backoff on 429 / 5xx (honouring Retry-After).
+// and retries with backoff on 429 / 5xx (honouring Retry-After), and on Google's 403 quota errors.
 
 export class ApiError extends Error {
   constructor(
@@ -98,7 +98,13 @@ export class ApiClient {
         await this.sleep(retryAfter(res) ?? backoff(attempt));
         continue;
       }
-      throw new ApiError(res.status, await res.text(), url);
+      const text = await res.text();
+      // Google reports per-minute quotas as 403: wait for the window to pass, then try again.
+      if (res.status === 403 && RATE_LIMITED.test(text) && attempt < maxRetries) {
+        await this.sleep(retryAfter(res) ?? quotaBackoff(attempt));
+        continue;
+      }
+      throw new ApiError(res.status, text, url);
     }
   }
 }
@@ -111,6 +117,14 @@ function buildUrl(base: string, pathOrUrl: string, query?: Query): string {
 
 function backoff(attempt: number): number {
   return Math.min(30_000, 1000 * 2 ** attempt);
+}
+
+/** Google's 403 bodies for quotas and rate limits (as opposed to missing permissions). */
+const RATE_LIMITED = /rateLimitExceeded|userRateLimitExceeded|quotaExceeded|Quota exceeded|RATE_LIMIT_EXCEEDED/;
+
+/** Quotas are counted per minute: 5, 10, 20, then 40 seconds. */
+function quotaBackoff(attempt: number): number {
+  return Math.min(60_000, 5_000 * 2 ** attempt);
 }
 
 function retryAfter(res: Response): number | undefined {

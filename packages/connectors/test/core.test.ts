@@ -23,6 +23,19 @@ describe("ApiClient", () => {
     expect(sleeps).toEqual([2000]);
   });
 
+  it("waits out Google's 403 quota errors, but not a 403 for missing access", async () => {
+    const quota = { error: { code: 403, message: "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'" } };
+    const { fetch } = fakeFetch([
+      { match: ["/x"], status: 403, json: quota, times: 2 },
+      { match: ["/x"], json: { ok: 1 } },
+      { match: ["/denied"], status: 403, json: { error: { code: 403, message: "The caller does not have permission" } } },
+    ]);
+    const { c, sleeps } = make(fetch);
+    expect(await c.json("/x")).toEqual({ ok: 1 });
+    expect(sleeps).toEqual([5000, 10000]);
+    await expect(c.json("/denied")).rejects.toMatchObject({ status: 403 });
+  });
+
   it("refreshes once on 401 and retries", async () => {
     const { fetch } = fakeFetch([{ match: ["/x"], status: 401, times: 1 }, { match: ["/x"], json: { ok: 1 } }]);
     let refreshed = 0;

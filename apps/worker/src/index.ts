@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Queue, Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { createPrismaClient } from "@kept/db";
@@ -20,6 +21,18 @@ import { createSourceSyncProcessor } from "./sync-source.js";
 
 const prisma = createPrismaClient(env.DATABASE_URL);
 const connection = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
+
+/** A lock in Redis, shared by every worker process; released only by its holder. */
+const redisLock = {
+  async acquire(key: string, ttlMs: number) {
+    const token = randomUUID();
+    const ok = await connection.set(`kept:lock:${key}`, token, "PX", ttlMs, "NX");
+    if (ok !== "OK") return null;
+    return async () => {
+      await connection.eval(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) end return 0`, 1, `kept:lock:${key}`, token);
+    };
+  },
+};
 
 const model = env.OPENAI_API_KEY ? openAIChatModel({ apiKey: env.OPENAI_API_KEY }) : null;
 // OCR for scanned documents and images (only those routed to a client).
@@ -92,7 +105,7 @@ matchWorker.on("failed", (job, err) => console.error(`matching org ${job?.data.o
 // One org at a time per worker slot; model calls dominate, and their rate limits are per API key.
 const extractWorker = new Worker<ExtractJobData>(
   EXTRACT_QUEUE,
-  createExtractProcessor({ prisma, model, extractQueue, agentRunQueue, config: connectors, transcriber }),
+  createExtractProcessor({ prisma, model, extractQueue, agentRunQueue, config: connectors, transcriber, lock: redisLock }),
   { connection, concurrency: 2, lockDuration: 10 * 60 * 1000 },
 );
 extractWorker.on("ready", () => console.log(`worker listening on queue "${EXTRACT_QUEUE}"`));

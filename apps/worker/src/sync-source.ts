@@ -4,9 +4,8 @@ import { Prisma, type PrismaClient } from "@kept/db";
 import { AuthError, runSync, type ConnectorConfig, type SourceItemInput, type SyncState } from "@kept/connectors";
 import type { MatchJobData, SourceSyncJobData } from "@kept/shared";
 import { clientForConnection } from "./connection-client.js";
+import { env } from "./env.js";
 
-/** First sync of a stream reaches this far back. */
-const BACKFILL_DAYS = 90;
 /** Pages per job; a larger backlog continues in a follow-up job so others get a turn. */
 const MAX_STEPS = 100;
 /** A claim older than this belongs to a worker that died mid-sync. */
@@ -45,7 +44,8 @@ export function createSourceSyncProcessor(
         def,
         client,
         connection.syncState as SyncState,
-        { since: new Date(now.getTime() - BACKFILL_DAYS * 24 * 60 * 60 * 1000), now },
+        // The first sync of a stream reaches SYNC_BACKFILL_HOURS back.
+        { since: new Date(now.getTime() - env.SYNC_BACKFILL_HOURS * 60 * 60 * 1000), now },
         {
           maxSteps: MAX_STEPS,
           async onPage({ items, state }) {

@@ -1,4 +1,4 @@
-import type { Job, Queue } from "bullmq";
+import { DelayedError, type Job, type Queue } from "bullmq";
 import { closeFlagsForCommitment, type Prisma, type PrismaClient } from "@kept/db";
 import { extractFromItem, looksLikeContract, readContractTerms, type ChatModel, type ExtractedFinding, type Transcriber } from "@kept/agents";
 import type { ConnectorConfig } from "@kept/connectors";
@@ -26,19 +26,42 @@ interface Deps {
   config: ConnectorConfig | null;
   /** OCR for scans; null without OPENAI_API_KEY. */
   transcriber: Transcriber | null;
+  /** One extraction per org at a time (a lock shared by every worker process). */
+  lock: OrgLock;
 }
 
+export interface OrgLock {
+  /** Takes the lock for ttlMs; returns a release function, or null when someone else holds it. */
+  acquire(key: string, ttlMs: number): Promise<(() => Promise<void>) | null>;
+}
+
+/** Longer than one extraction job (the worker's lockDuration), so a held lock never expires mid-job. */
+const EXTRACT_LOCK_MS = 10 * 60 * 1000;
+/** A job that finds its org already being extracted waits this long and tries again. */
+const RETRY_LOCKED_MS = 15_000;
+
 export function createExtractProcessor(deps: Deps) {
-  return async (job: Job<ExtractJobData>) => {
+  return async (job: Job<ExtractJobData>, token?: string) => {
     const { orgId } = job.data;
     if (!deps.model) return { skipped: "OPENAI_API_KEY is not set" };
 
-    // Files routed to a client are read first, so their text is extracted in this same job.
-    const documents = await readPendingDocuments(deps.prisma, deps.config, deps.transcriber, orgId);
-    const result = await extractOrg(deps.prisma, deps.model, orgId);
-    for (const accountId of result.accounts) await queueAccountRun(deps.prisma, deps.agentRunQueue, orgId, accountId);
-    if (result.more || documents.more) await deps.extractQueue.add("extract", { orgId }, { removeOnComplete: true, removeOnFail: 100 });
-    return { ...result, accounts: result.accounts.length, documentsRead: documents.read, documentsSkipped: documents.skipped };
+    // Two jobs for the same org would read the same items and store each finding twice.
+    // The job that finds the org taken waits, then runs and picks up whatever is still pending.
+    const release = await deps.lock.acquire(`extract:${orgId}`, EXTRACT_LOCK_MS);
+    if (!release) {
+      await job.moveToDelayed(Date.now() + RETRY_LOCKED_MS, token);
+      throw new DelayedError();
+    }
+    try {
+      // Files routed to a client are read first, so their text is extracted in this same job.
+      const documents = await readPendingDocuments(deps.prisma, deps.config, deps.transcriber, orgId);
+      const result = await extractOrg(deps.prisma, deps.model, orgId);
+      for (const accountId of result.accounts) await queueAccountRun(deps.prisma, deps.agentRunQueue, orgId, accountId);
+      if (result.more || documents.more) await deps.extractQueue.add("extract", { orgId }, { removeOnComplete: true, removeOnFail: 100 });
+      return { ...result, accounts: result.accounts.length, documentsRead: documents.read, documentsSkipped: documents.skipped };
+    } finally {
+      await release();
+    }
   };
 }
 

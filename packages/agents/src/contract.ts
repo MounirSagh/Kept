@@ -33,12 +33,12 @@ const schema = z.object({
   noticeDays: z.number().nullable().describe("Days of notice required to cancel or not renew. Null if not stated."),
   annualValue: z.number().nullable().describe("What the customer pays per year, in currency units (convert monthly fees to yearly). Null if not stated."),
   currency: z.string().nullable().describe("ISO 4217 code, e.g. USD."),
-  excerpt: z.string().describe("The exact words stating the term or renewal, or the fee, copied verbatim."),
+  excerpt: z.string().describe("One sentence stating the renewal or term (or else the fee), copied verbatim from a single line of the document: under 200 characters."),
 });
 
 const SYSTEM = `You read a customer contract for the account team: when it renews, the notice needed to cancel, and what the customer pays per year.
 Only report what the document states. Compute the renewal date from a start date and term length when both are given. If the document isn't an agreement with the customer, say so.
-The excerpt must be copied character for character from the document: it is checked.`;
+The excerpt must be copied character for character from the document, a short part of one sentence: it is checked, and a long or stitched-together quote fails the check.`;
 
 /**
  * The renewal date, notice period and yearly value a contract states, for suggesting onto the

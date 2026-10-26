@@ -78,6 +78,7 @@ export function AccountDetailPage() {
   const [commitments, setCommitments] = useState<CommitmentDto[] | null>(null);
   const [theirs, setTheirs] = useState<CommitmentDto[]>([]);
   const [documents, setDocuments] = useState<DocumentDto[]>([]);
+  const [review, setReview] = useState<"idle" | "starting" | "started" | "failed">("idle");
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const manage = can(actor, { action: "account.manage" });
@@ -124,7 +125,23 @@ export function AccountDetailPage() {
         </span>
       }
       description={subtitle || undefined}
-      actions={manage && <button className={ui.button.ghost} onClick={() => setDialog({ kind: "edit" })}>Edit company</button>}
+      actions={
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {review === "started" && <span className={ui.hint} role="status">Reviewing: flags and suggestions appear in a minute or two.</span>}
+          {review === "failed" && <span className="text-[0.8125rem] text-danger" role="status">The review couldn't start. Try again.</span>}
+          <button
+            className={ui.button.ghost}
+            disabled={review === "starting" || review === "started"}
+            onClick={() => {
+              setReview("starting");
+              api.reviewAccount(orgId, accountId!).then(() => setReview("started"), () => setReview("failed"));
+            }}
+          >
+            {review === "starting" ? "Starting…" : "Review now"}
+          </button>
+          {manage && <button className={ui.button.ghost} onClick={() => setDialog({ kind: "edit" })}>Edit company</button>}
+        </div>
+      }
       back={back}
     >
       <div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_20rem]">

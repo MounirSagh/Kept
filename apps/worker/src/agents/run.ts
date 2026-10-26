@@ -1,4 +1,4 @@
-import type { Job } from "bullmq";
+import { DelayedError, type Job } from "bullmq";
 import { Prisma, type PrismaClient } from "@kept/db";
 import {
   flagDedupeKey, normalizeForMatch, runAccountAgents, truncate,
@@ -231,8 +231,13 @@ function describeAction(type: string, payload: Prisma.JsonValue): string {
 
 const SEVERITY_RANK = { low: 0, medium: 1, high: 2, critical: 3 } as const;
 
+/** A run that has been "running" longer than this belongs to a worker that died; it doesn't block others. */
+const STALE_RUN_MS = 30 * 60 * 1000;
+/** A run that finds its account already under review waits this long and tries again. */
+const RETRY_BUSY_MS = 30_000;
+
 export function createAgentRunProcessor(prisma: PrismaClient, model: ChatModel | null) {
-  return async (job: Job<AgentRunJobData>) => {
+  return async (job: Job<AgentRunJobData>, token?: string) => {
     const { runId } = job.data;
     const run = await prisma.agentRun.findUnique({ where: { id: runId } });
     if (!run || run.status === "completed" || run.status === "cancelled" || run.status === "failed") return { skipped: true };
@@ -249,7 +254,21 @@ export function createAgentRunProcessor(prisma: PrismaClient, model: ChatModel |
     if (!run.accountId) throw new Error("Agent runs need an account");
     const { orgId, accountId } = run;
 
-    await prisma.agentRun.update({ where: { id: runId }, data: { status: "running", startedAt: new Date(), error: null } });
+    // One run per account at a time: two at once would raise the same flags and draft the same actions.
+    // The check and the claim happen under a per-account lock, so two runs can't both see the account free.
+    const claimed = await prisma.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-run:${accountId}`}, 0))`;
+      const busy = await tx.agentRun.count({
+        where: { accountId, status: "running", id: { not: runId }, startedAt: { gte: new Date(Date.now() - STALE_RUN_MS) } },
+      });
+      if (busy > 0) return false;
+      await tx.agentRun.update({ where: { id: runId }, data: { status: "running", startedAt: new Date(), error: null } });
+      return true;
+    });
+    if (!claimed) {
+      await job.moveToDelayed(Date.now() + RETRY_BUSY_MS, token);
+      throw new DelayedError();
+    }
 
     // A retried job continues the step numbering instead of colliding with the failed attempt's steps.
     let stepIndex = await prisma.agentStep.count({ where: { runId } });

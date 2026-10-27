@@ -6,6 +6,7 @@ import { cx } from "../ui";
 import { NAV } from "./nav";
 import { OrgProvider, useOrg } from "./org-context";
 import { Loading } from "../components/Page";
+import { Wordmark } from "../components/Wordmark";
 
 export function AppShell() {
   return (
@@ -73,12 +74,14 @@ function Shell() {
 }
 
 function Sidebar() {
-  const { actor, me } = useOrg();
+  const { actor, me, org } = useOrg();
 
   return (
     <div className="flex h-full flex-col">
-      <div className="p-3">
-        <OrgSwitcher />
+      <div className="flex justify-center px-3 pt-5 pb-4">
+        <Link to={`/o/${org.slug}/overview`} aria-label="Kept, go to overview" className="rounded-md px-2 py-1 transition-opacity duration-150 hover:opacity-80">
+          <Wordmark className="text-[1.75rem] text-ink" markClassName="text-brand" />
+        </Link>
       </div>
 
       <nav className="flex-1 overflow-y-auto px-3 pb-4" aria-label="Main">
@@ -123,7 +126,11 @@ function Sidebar() {
         })}
       </nav>
 
-      <div className="flex items-center gap-2.5 border-t border-line px-4 py-3">
+      {/* The organization, and switching between them, sits with the account it belongs to. */}
+      <div className="border-t border-line px-3 pt-2.5">
+        <OrgSwitcher />
+      </div>
+      <div className="flex items-center gap-2.5 px-4 pt-2 pb-3">
         <UserButton />
         <div className="min-w-0 text-[0.8125rem] leading-tight">
           <p className="truncate font-medium">{me.user.fullName ?? me.user.email}</p>
@@ -179,7 +186,7 @@ function OrgSwitcher() {
       </button>
       {open && (
         <ul
-          className="absolute inset-x-0 top-full z-50 mt-1 rounded-lg border border-line bg-canvas p-1 shadow-lg"
+          className="absolute inset-x-0 bottom-full z-50 mb-1 rounded-lg border border-line bg-canvas p-1 shadow-lg"
           role="listbox"
           aria-label="Organizations"
         >

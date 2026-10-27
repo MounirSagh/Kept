@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import { CloudShader } from "@/components/ui/cloud-shader";
 import { Wordmark } from "@/components/Wordmark";
 
-/** Sign-in and sign-up: a rounded panel of still sky on the left, the form on the right. Phones get the form only. */
+/** Sign-in and sign-up: a rounded panel of sunset sky on the left, the form on the right. Phones get the form only. */
 export function AuthLayout({
   title,
   subtitle,
@@ -21,7 +21,7 @@ export function AuthLayout({
         aria-hidden
         className="relative isolate hidden w-1/2 flex-col justify-between overflow-hidden rounded-[1.25rem] p-10 lg:flex"
       >
-        <CloudShader className="absolute inset-0 -z-10" speed={0} stillTime={18} count={5} />
+        <CloudShader className="absolute inset-0 -z-10" speed={0.6} stillTime={18} count={5} skyTopColor="#22325c" skyBottomColor="#e8a47f" cloudColor="#fde7d6" />
         <div className="flex items-center gap-4 text-xs font-semibold tracking-[0.25em] text-white uppercase drop-shadow-sm">
           
         </div>

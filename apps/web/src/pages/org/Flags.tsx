@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Link, useLocation, useSearchParams } from "react-router";
 import type { CommitmentDto, FlagDto, FlagKindValue, SeverityValue } from "@kept/shared";
 import { useApi } from "../../api";
+import { CompanyFilter, companyParam } from "../../components/CompanyFilter";
 import { useOrg } from "../../app/org-context";
 import { Field, FormError, Modal, ModalActions, useSubmit } from "../../components/Modal";
 import { EmptyState, Loading, Page } from "../../components/Page";
@@ -78,13 +79,14 @@ export function FlagsPage() {
   const { orgId } = useOrg();
   const [params, setParams] = useSearchParams();
   const tab = params.get("status") === "closed" ? "closed" : "open";
+  const [company, setCompany] = companyParam(params, setParams);
   const [flags, setFlags] = useState<FlagDto[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [decision, setDecision] = useState<Decision | null>(null);
 
   const load = useCallback(
-    () => api.flags(orgId, tab).then(setFlags, (err: Error) => setError(err.message)),
-    [api, orgId, tab],
+    () => api.flags(orgId, tab, company).then(setFlags, (err: Error) => setError(err.message)),
+    [api, orgId, tab, company],
   );
   useEffect(() => {
     setFlags(null);
@@ -93,13 +95,19 @@ export function FlagsPage() {
 
   return (
     <Page title="Flags" description="Promises that may slip, contradictions, and early churn signals, with the evidence behind each.">
-      <div className="mb-5 flex gap-1" role="tablist" aria-label="Status">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+      <div className="flex gap-1" role="tablist" aria-label="Status">
         {TABS.map((t) => (
           <button
             key={t.id}
             role="tab"
             aria-selected={tab === t.id}
-            onClick={() => setParams(t.id === "open" ? {} : { status: t.id }, { replace: true })}
+            onClick={() => {
+              const next = new URLSearchParams(params);
+              if (t.id === "open") next.delete("status");
+              else next.set("status", t.id);
+              setParams(next, { replace: true });
+            }}
             className={cx(
               "rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-150",
               tab === t.id ? "bg-selected text-ink" : "text-ink-muted hover:bg-hover hover:text-ink",
@@ -108,6 +116,8 @@ export function FlagsPage() {
             {t.label}
           </button>
         ))}
+      </div>
+        <CompanyFilter value={company} onChange={setCompany} />
       </div>
 
       {error && <p className={ui.errorBlock}>{error}</p>}

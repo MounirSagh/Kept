@@ -158,9 +158,18 @@ export function AccountDetailPage() {
               <h2 className="text-sm font-semibold">
                 Open commitments <span className="font-normal text-ink-muted">{commitments.length}</span>
               </h2>
-              <Link to="../../commitments" relative="path" className="text-[0.8125rem] text-ink-muted hover:text-ink">
-                All commitments
-              </Link>
+              {/* The org-wide lists, narrowed to this company. */}
+              <span className="flex gap-3 text-[0.8125rem]">
+                <Link to={`../../flags?company=${account.id}`} relative="path" className="text-ink-muted hover:text-ink">
+                  Flags
+                </Link>
+                <Link to={`../../approvals?company=${account.id}`} relative="path" className="text-ink-muted hover:text-ink">
+                  Approvals
+                </Link>
+                <Link to={`../../commitments?company=${account.id}`} relative="path" className="text-ink-muted hover:text-ink">
+                  All commitments
+                </Link>
+              </span>
             </div>
             {commitments.length === 0 ? (
               <EmptyState icon={ListChecks} title="Nothing open">
@@ -179,7 +188,7 @@ export function AccountDetailPage() {
                       </p>
                     </div>
                     <span className="flex items-center gap-2 text-[0.8125rem] whitespace-nowrap">
-                      {c.risk && <RiskBadge risk={c.risk} to="../flags" />}
+                      {c.risk && <RiskBadge risk={c.risk} to={`../flags?company=${account.id}`} />}
                       <DueDate commitment={c} />
                     </span>
                   </li>
@@ -233,7 +242,7 @@ export function AccountDetailPage() {
           {theirs.length > 0 && (
             <SideSection
               title={<>Their promises <span className="font-normal normal-case">{theirs.length}</span></>}
-              aside={<Link to="../commitments?side=theirs" className="text-[0.8125rem] text-ink-muted hover:text-ink">All</Link>}
+              aside={<Link to={`../commitments?side=theirs&company=${account.id}`} className="text-[0.8125rem] text-ink-muted hover:text-ink">All</Link>}
             >
               <ul className="divide-y divide-line">
                 {theirs.map((c) => (

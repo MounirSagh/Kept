@@ -77,12 +77,13 @@ async function linearTeams(orgId: string): Promise<ActionsDto["linearTeams"]> {
   return [...teams.values()].sort((a, b) => b.last - a.last).map(({ key, name }) => ({ key, name }));
 }
 
-export async function listActions(actor: OrgActor, filter: { view: "pending" | "history" }): Promise<ActionsDto> {
+export async function listActions(actor: OrgActor, filter: { view: "pending" | "history"; accountId?: string }): Promise<ActionsDto> {
   const [actions, canSendEmail, teams] = await Promise.all([
     prisma.proposedAction.findMany({
       where: {
         AND: [
           visibleActionsWhere(actor),
+          ...(filter.accountId ? [{ accountId: filter.accountId }] : []),
           // Failed actions stay in the inbox: they can be approved again once the cause is fixed.
           { status: filter.view === "pending" ? { in: ["pending", "failed"] } : { in: ["approved", "executing", "done", "rejected"] } },
         ],

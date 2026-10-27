@@ -5,6 +5,7 @@ import type {
   AccountUpdatePayload, ActionPayload, ActionsDto, AlertPayload, CrmTaskPayload, ProposedActionDto, ReminderPayload, SendEmailPayload, TicketPayload,
 } from "@kept/shared";
 import { useApi } from "../../api";
+import { CompanyFilter, companyParam } from "../../components/CompanyFilter";
 import { useOrg } from "../../app/org-context";
 import { Field, FormError, Modal, ModalActions, useSubmit } from "../../components/Modal";
 import { EmptyState, Loading, Page } from "../../components/Page";
@@ -92,11 +93,15 @@ export function ApprovalsPage() {
   const { orgId } = useOrg();
   const [params, setParams] = useSearchParams();
   const tab = params.get("view") === "history" ? "history" : "pending";
+  const [company, setCompany] = companyParam(params, setParams);
   const [data, setData] = useState<ActionsDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reviewing, setReviewing] = useState<ProposedActionDto | null>(null);
 
-  const load = useCallback(() => api.actions(orgId, tab).then(setData, (err: Error) => setError(err.message)), [api, orgId, tab]);
+  const load = useCallback(
+    () => api.actions(orgId, tab, company).then(setData, (err: Error) => setError(err.message)),
+    [api, orgId, tab, company],
+  );
   useEffect(() => {
     setData(null);
     void load();
@@ -106,13 +111,19 @@ export function ApprovalsPage() {
 
   return (
     <Page title="Approvals" description="Follow-ups Kept proposes. Nothing happens until someone approves it.">
-      <div className="mb-5 flex gap-1" role="tablist" aria-label="View">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+      <div className="flex gap-1" role="tablist" aria-label="View">
         {TABS.map((t) => (
           <button
             key={t.id}
             role="tab"
             aria-selected={tab === t.id}
-            onClick={() => setParams(t.id === "pending" ? {} : { view: t.id }, { replace: true })}
+            onClick={() => {
+              const next = new URLSearchParams(params);
+              if (t.id === "pending") next.delete("view");
+              else next.set("view", t.id);
+              setParams(next, { replace: true });
+            }}
             className={cx(
               "rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-150",
               tab === t.id ? "bg-selected text-ink" : "text-ink-muted hover:bg-hover hover:text-ink",
@@ -121,6 +132,8 @@ export function ApprovalsPage() {
             {t.label}
           </button>
         ))}
+      </div>
+        <CompanyFilter value={company} onChange={setCompany} />
       </div>
 
       {needsMailbox && (

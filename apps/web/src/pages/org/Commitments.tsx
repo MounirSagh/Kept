@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useSearchParams } from "react-router";
 import { toCommitmentRows, type AccountDto, type CommitmentDto, type PromiseSide } from "@kept/shared";
 import { useApi } from "../../api";
+import { CompanyFilter, companyParam } from "../../components/CompanyFilter";
 import { memberName, useOrg } from "../../app/org-context";
 import { ImportDialog } from "../../components/ImportDialog";
 import { ConfirmDialog, Field, FormError, Modal, ModalActions, useSubmit } from "../../components/Modal";
@@ -72,12 +73,14 @@ export function CommitmentsPage() {
   const filter = (FILTERS.find((f) => f.id === params.get("status"))?.id ?? "open") as (typeof FILTERS)[number]["id"];
   // Promises our team made, or promises the customer made to us.
   const side: PromiseSide = params.get("side") === "theirs" ? "obligation" : "commitment";
+  const [company, setCompany] = companyParam(params, setParams);
   const setView = (next: { side?: PromiseSide; status?: string }) => {
     const out = new URLSearchParams();
     const s = next.side ?? side;
     const st = next.status ?? filter;
     if (s === "obligation") out.set("side", "theirs");
     if (st !== "open") out.set("status", st);
+    if (company) out.set("company", company);
     setParams(out, { replace: true });
   };
   const [commitments, setCommitments] = useState<CommitmentDto[] | null>(null);
@@ -87,14 +90,17 @@ export function CommitmentsPage() {
 
   const load = useCallback(
     () =>
-      Promise.all([api.commitments(orgId, { type: side, ...(filter === "all" ? {} : { status: filter }) }), api.accounts(orgId)]).then(
+      Promise.all([
+        api.commitments(orgId, { type: side, ...(filter === "all" ? {} : { status: filter }), ...(company ? { accountId: company } : {}) }),
+        api.accounts(orgId),
+      ]).then(
         ([c, a]) => {
           setCommitments(c);
           setAccounts(a);
         },
         (err: Error) => setError(err.message),
       ),
-    [api, orgId, filter, side],
+    [api, orgId, filter, side, company],
   );
   useEffect(() => {
     void load();
@@ -148,7 +154,8 @@ export function CommitmentsPage() {
           </button>
         ))}
       </div>
-      <div className="mb-5 flex gap-1" role="tablist" aria-label="Status">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+      <div className="flex gap-1" role="tablist" aria-label="Status">
         {FILTERS.map((f) => (
           <button
             key={f.id}
@@ -163,6 +170,8 @@ export function CommitmentsPage() {
             {f.label}
           </button>
         ))}
+      </div>
+        <CompanyFilter value={company} onChange={setCompany} />
       </div>
 
       {error && <p className={ui.errorBlock}>{error}</p>}

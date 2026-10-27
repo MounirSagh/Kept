@@ -6,7 +6,7 @@ import { currentActor } from "../middlewares/auth.js";
 import * as actions from "../services/actions.service.js";
 
 const params = z.object({ actionId: z.uuid() });
-const listQuery = z.object({ view: z.enum(["pending", "history"]).default("pending") });
+const listQuery = z.object({ view: z.enum(["pending", "history"]).default("pending"), accountId: z.uuid().optional() });
 const decision = z.object({
   decision: z.enum(["approve", "reject"]),
   // Checked against the action's type in the service.

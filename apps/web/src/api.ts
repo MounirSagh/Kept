@@ -172,10 +172,12 @@ export function useApi() {
       deleteCommitment: (orgId: string, id: string) => request<void>(`/orgs/${orgId}/commitments/${id}`, { method: "DELETE" }),
       importCommitments: (orgId: string, rows: (CommitmentImportRow & { row: number })[]) =>
         request<ImportResultDto>(`/orgs/${orgId}/commitments/import`, { method: "POST", body: JSON.stringify({ rows }) }),
-      flags: (orgId: string, status: "open" | "closed") => request<FlagDto[]>(`/orgs/${orgId}/flags?status=${status}`),
+      flags: (orgId: string, status: "open" | "closed", accountId?: string | null) =>
+        request<FlagDto[]>(`/orgs/${orgId}/flags?status=${status}${accountId ? `&accountId=${accountId}` : ""}`),
       decideFlag: (orgId: string, flagId: string, input: FlagDecisionInput) =>
         request<FlagDto>(`/orgs/${orgId}/flags/${flagId}/decision`, { method: "POST", body: JSON.stringify(input) }),
-      actions: (orgId: string, view: "pending" | "history") => request<ActionsDto>(`/orgs/${orgId}/actions?view=${view}`),
+      actions: (orgId: string, view: "pending" | "history", accountId?: string | null) =>
+        request<ActionsDto>(`/orgs/${orgId}/actions?view=${view}${accountId ? `&accountId=${accountId}` : ""}`),
       decideAction: (orgId: string, actionId: string, input: ActionDecisionInput) =>
         request<ProposedActionDto>(`/orgs/${orgId}/actions/${actionId}/decision`, { method: "POST", body: JSON.stringify(input) }),
 

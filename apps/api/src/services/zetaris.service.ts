@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { Prisma } from "@kept/db";
 import {
-  DATASET_PARAMS, TOKEN_KEY_VERSION, ZetarisError, accountParams, bindDataset, decryptToken, encryptToken, normalizeRestUrl,
-  paramsProblem, readOnlyProblem, zetarisConfig, zetarisQuery, type ZetarisConfig,
+  DATASET_PARAMS, TOKEN_KEY_VERSION, ZetarisError, accountParams, bindDataset, decodeZetarisSecret, decryptToken, encodeZetarisSecret,
+  encryptToken, normalizeRestUrl, paramsProblem, readOnlyProblem, zetarisConfig, zetarisLogin, zetarisQuery, type ZetarisAuth, type ZetarisConfig,
 } from "@kept/connectors";
 import {
   can, type ZetarisConnectInput, type ZetarisDatasetDto, type ZetarisDatasetInput, type ZetarisDto, type ZetarisTestDto, type ZetarisTestInput,
@@ -37,7 +37,7 @@ async function loadConnected(orgId: string) {
   const connection = await findConnection(orgId);
   const config = connection ? zetarisConfig(connection.syncState) : null;
   if (!connection || !config || !connection.accessTokenEnc) throw new HttpError(409, "Connect Zetaris first");
-  return { connection, config, apiKey: decryptToken(connection.accessTokenEnc, encryptionKey()) };
+  return { connection, config, auth: decodeZetarisSecret(decryptToken(connection.accessTokenEnc, encryptionKey())) };
 }
 
 async function saveConfig(connectionId: string, syncState: Prisma.JsonValue, config: ZetarisConfig) {
@@ -49,10 +49,13 @@ export async function getZetaris(actor: OrgActor): Promise<ZetarisDto> {
   assertOwner(actor);
   const connection = await findConnection(actor.orgId);
   const config = connection ? zetarisConfig(connection.syncState) : null;
+  const auth = connection?.accessTokenEnc && connectors ? decodeZetarisSecret(decryptToken(connection.accessTokenEnc, connectors.encryptionKey)) : null;
   return {
     connected: !!connection && !!config && connection.status === "active",
     restUrl: config?.restUrl ?? null,
     zetarisOrgId: config?.orgId ?? null,
+    signIn: !auth ? null : "apiKey" in auth ? "api_key" : "password",
+    username: auth && "username" in auth ? auth.username : null,
     lastError: connection?.lastError ?? null,
     datasets: (config?.datasets ?? []).map(({ id, name, description, sql }): ZetarisDatasetDto => ({ id, name, description, sql })),
     params: [...DATASET_PARAMS],
@@ -64,22 +67,36 @@ export async function connectZetaris(actor: OrgActor, input: ZetarisConnectInput
   assertOwner(actor);
   const restUrl = normalizeRestUrl(input.restUrl);
   if (!/^https?:\/\/[^\s]+$/.test(restUrl)) throw new HttpError(400, "Enter the Zetaris address, starting with http:// or https://");
-  if (!/^\d+$/.test(input.zetarisOrgId.trim())) throw new HttpError(400, "The organization id is a number (Management → Organisation in Zetaris)");
-  const orgId = input.zetarisOrgId.trim();
   const existing = await findConnection(actor.orgId);
-  const key = input.apiKey?.trim() || (existing?.accessTokenEnc ? decryptToken(existing.accessTokenEnc, encryptionKey()) : "");
-  if (!key) throw new HttpError(400, "Add the API key");
+  const stored = existing?.accessTokenEnc ? decodeZetarisSecret(decryptToken(existing.accessTokenEnc, encryptionKey())) : null;
 
+  // A new API key, a new sign-in, or what's stored (when only the address or org changed).
+  let auth: ZetarisAuth | null = null;
+  if (input.apiKey?.trim()) auth = { apiKey: input.apiKey.trim() };
+  else if (input.username?.trim() && input.password) auth = { username: input.username.trim(), password: input.password };
+  else if (input.username?.trim() && stored && "username" in stored && stored.username === input.username.trim()) auth = stored;
+  else if (!input.username?.trim() && stored && "apiKey" in stored) auth = stored;
+  if (!auth) throw new HttpError(400, input.username?.trim() ? "Add the password" : "Add the API key, or sign in with an email and password");
+
+  let orgId = input.zetarisOrgId?.trim() ?? "";
+  if (orgId && !/^\d+$/.test(orgId)) throw new HttpError(400, "The organization id is a number (Management → Organisation in Zetaris)");
   try {
-    await zetarisQuery({ restUrl, orgId }, key, "SELECT 1", { limit: 1, timeoutMs: 20_000 });
+    if ("apiKey" in auth) {
+      if (!orgId) throw new HttpError(400, "With an API key, add the organization id (Management → Organisation in Zetaris)");
+    } else {
+      // The sign-in says which organization the user belongs to.
+      orgId ||= (await zetarisLogin(restUrl, auth, { timeoutMs: 20_000, fresh: true })).orgId;
+    }
+    await zetarisQuery({ restUrl, orgId }, auth, "SELECT 1", { limit: 1, timeoutMs: 30_000 });
   } catch (err) {
+    if (err instanceof HttpError) throw err;
     throw new HttpError(400, err instanceof ZetarisError ? err.message : `Zetaris didn't answer: ${(err as Error).message}`);
   }
 
   const config: ZetarisConfig = { restUrl, orgId, datasets: existing ? (zetarisConfig(existing.syncState)?.datasets ?? []) : [] };
   const data = {
     label: restUrl.replace(/^https?:\/\//, ""),
-    accessTokenEnc: encryptToken(key, encryptionKey()),
+    accessTokenEnc: encryptToken(encodeZetarisSecret(auth), encryptionKey()),
     tokenKeyVersion: TOKEN_KEY_VERSION,
     scopes: [],
     status: "active" as const,
@@ -144,7 +161,7 @@ export async function testDataset(actor: OrgActor, input: ZetarisTestInput): Pro
   assertOwner(actor);
   const problem = readOnlyProblem(input.sql) ?? paramsProblem(input.sql);
   if (problem) throw new HttpError(400, problem);
-  const { config, apiKey } = await loadConnected(actor.orgId);
+  const { config, auth } = await loadConnected(actor.orgId);
   const account = await prisma.account.findFirst({
     where: { id: input.accountId, orgId: actor.orgId, deletedAt: null },
     select: { id: true, name: true, domain: true, crmExternalId: true },
@@ -153,7 +170,7 @@ export async function testDataset(actor: OrgActor, input: ZetarisTestInput): Pro
   const sql = bindDataset(input.sql, accountParams(account));
   if (!sql) return { sql: null, columns: [], rows: [], note: `${account.name} lacks a value this query needs (a domain, or a HubSpot id): it won't be queried for them.` };
   try {
-    const result = await zetarisQuery(config, apiKey, sql, { limit: TEST_ROWS });
+    const result = await zetarisQuery(config, auth, sql, { limit: TEST_ROWS });
     return { sql, columns: result.columns, rows: result.rows, note: result.rows.length === 0 ? "No rows for this company." : null };
   } catch (err) {
     throw new HttpError(400, err instanceof ZetarisError ? err.message : (err as Error).message);

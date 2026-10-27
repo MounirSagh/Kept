@@ -6,8 +6,10 @@ import * as zetaris from "../services/zetaris.service.js";
 
 const connectBody = z.object({
   restUrl: z.string().min(1).max(500),
-  zetarisOrgId: z.string().min(1).max(20),
+  zetarisOrgId: z.string().max(20).optional(),
   apiKey: z.string().max(4000).optional(),
+  username: z.string().max(320).optional(),
+  password: z.string().max(500).optional(),
 });
 const datasetBody = z.object({ name: z.string().max(200), description: z.string().max(2000), sql: z.string().max(10_000) });
 const datasetParams = z.object({ datasetId: z.uuid() });

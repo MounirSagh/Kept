@@ -68,7 +68,7 @@ export function ZetarisSection({ canManage }: { canManage: boolean }) {
                 : !data
                   ? "Loading…"
                   : data.connected
-                    ? <>Connected to {data.restUrl} · organization {data.zetarisOrgId}</>
+                    ? <>Connected to {data.restUrl} · organization {data.zetarisOrgId}{data.username ? ` · as ${data.username}` : ""}</>
                     : "Not connected"}
             </p>
             {data?.lastError && <p className="mt-0.5 text-xs text-warn">{data.lastError}</p>}
@@ -166,14 +166,23 @@ function ConnectDialog({ current, onClose, onSaved }: { current: ZetarisDto; onC
   const api = useApi();
   const { orgId } = useOrg();
   const { pending, error, submit } = useSubmit();
+  const [mode, setMode] = useState<"password" | "api_key">(current.signIn === "api_key" ? "api_key" : "password");
   const [restUrl, setRestUrl] = useState(current.restUrl ?? "");
   const [zetarisOrgId, setZetarisOrgId] = useState(current.zetarisOrgId ?? "");
+  const [username, setUsername] = useState(current.username ?? "");
+  const [password, setPassword] = useState("");
   const [apiKey, setApiKey] = useState("");
+  // What's stored can be kept when only the address or org changes.
+  const keepsSecret = current.connected && current.signIn === mode;
 
   function onSubmit(e: FormEvent) {
     e.preventDefault();
     void submit(async () => {
-      onSaved(await api.connectZetaris(orgId, { restUrl, zetarisOrgId, apiKey: apiKey || undefined }));
+      const input =
+        mode === "password"
+          ? { restUrl, username, password: password || undefined, zetarisOrgId: zetarisOrgId || undefined }
+          : { restUrl, apiKey: apiKey || undefined, zetarisOrgId };
+      onSaved(await api.connectZetaris(orgId, input));
       onClose();
     });
   }
@@ -181,15 +190,57 @@ function ConnectDialog({ current, onClose, onSaved }: { current: ZetarisDto; onC
   return (
     <Modal title={current.connected ? "Zetaris connection" : "Connect Zetaris"} description="Kept checks the connection with SELECT 1 before saving it." onClose={onClose}>
       <form onSubmit={onSubmit} className="space-y-4">
-        <Field label="Address" htmlFor="z-url" hint={<>The engine's REST API, ending in /api/v1.0 (locally http://localhost:8888/api/v1.0), or your Zetaris web address.</>}>
-          <input id="z-url" className={cx(ui.input, "w-full")} value={restUrl} onChange={(e) => setRestUrl(e.target.value)} placeholder="http://localhost:8888/api/v1.0" required autoFocus />
+        <Field
+          label="Address"
+          htmlFor="z-url"
+          hint={<>Your cluster's Sign-in URL (https://new-ui.….cloud.zetaris.com), its API (https://api.….cloud.zetaris.com/api/v1.0), or http://localhost:8888/api/v1.0 for a local install.</>}
+        >
+          <input id="z-url" className={cx(ui.input, "w-full")} value={restUrl} onChange={(e) => setRestUrl(e.target.value)} placeholder="https://new-ui.<cluster>.cloud.zetaris.com" required autoFocus />
         </Field>
-        <Field label="Organization id" htmlFor="z-org" hint="The number under Management → Organisation in Zetaris.">
-          <input id="z-org" inputMode="numeric" className={cx(ui.input, "w-32")} value={zetarisOrgId} onChange={(e) => setZetarisOrgId(e.target.value)} required />
-        </Field>
-        <Field label="API key" htmlFor="z-key" hint={current.connected ? "Leave empty to keep the current key." : "Create one in Zetaris. It's stored encrypted."}>
-          <input id="z-key" type="password" autoComplete="off" className={cx(ui.input, "w-full")} value={apiKey} onChange={(e) => setApiKey(e.target.value)} required={!current.connected} />
-        </Field>
+
+        <fieldset>
+          <legend className={ui.label}>Sign in with</legend>
+          <div className="mt-1.5 flex gap-1" role="radiogroup">
+            {([["password", "Email and password"], ["api_key", "API key"]] as const).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="radio"
+                aria-checked={mode === id}
+                onClick={() => setMode(id)}
+                className={cx(
+                  "rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-150",
+                  mode === id ? "bg-selected text-ink" : "text-ink-muted hover:bg-hover hover:text-ink",
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </fieldset>
+
+        {mode === "password" ? (
+          <>
+            <Field label="Email" htmlFor="z-user" hint="A Zetaris user, like the org admin shown on your cluster's Overview.">
+              <input id="z-user" type="email" autoComplete="off" className={cx(ui.input, "w-full")} value={username} onChange={(e) => setUsername(e.target.value)} required />
+            </Field>
+            <Field label="Password" htmlFor="z-pass" hint={keepsSecret ? "Leave empty to keep the current password." : "Stored encrypted. Kept signs in like the Zetaris web app."}>
+              <input id="z-pass" type="password" autoComplete="off" className={cx(ui.input, "w-full")} value={password} onChange={(e) => setPassword(e.target.value)} required={!keepsSecret} />
+            </Field>
+            <Field label="Organization id (optional)" htmlFor="z-org" hint="Leave empty: Zetaris reports it when Kept signs in.">
+              <input id="z-org" inputMode="numeric" className={cx(ui.input, "w-32")} value={zetarisOrgId} onChange={(e) => setZetarisOrgId(e.target.value)} />
+            </Field>
+          </>
+        ) : (
+          <>
+            <Field label="Organization id" htmlFor="z-org" hint="The number under Management → Organisation in Zetaris.">
+              <input id="z-org" inputMode="numeric" className={cx(ui.input, "w-32")} value={zetarisOrgId} onChange={(e) => setZetarisOrgId(e.target.value)} required />
+            </Field>
+            <Field label="API key" htmlFor="z-key" hint={keepsSecret ? "Leave empty to keep the current key." : "Create one in Zetaris. It's stored encrypted."}>
+              <input id="z-key" type="password" autoComplete="off" className={cx(ui.input, "w-full")} value={apiKey} onChange={(e) => setApiKey(e.target.value)} required={!keepsSecret} />
+            </Field>
+          </>
+        )}
         <FormError error={error} />
         <ModalActions>
           <button type="button" className={ui.button.ghost} onClick={onClose} disabled={pending}>

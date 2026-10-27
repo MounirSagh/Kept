@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import type { Prisma, PrismaClient } from "@kept/db";
 import type { SourceDoc } from "@kept/agents";
 import {
-  ZetarisError, accountParams, bindDataset, decryptToken, renderTable, zetarisConfig, zetarisQuery, type ZetarisDataset,
+  ZetarisError, accountParams, bindDataset, decodeZetarisSecret, decryptToken, renderTable, zetarisConfig, zetarisQuery,
+  type ZetarisAuth, type ZetarisDataset,
 } from "@kept/connectors";
 
 // Live data for the agents, through the org's Zetaris connection. A dataset's result is saved as an
@@ -35,16 +36,16 @@ export async function accountData(prisma: PrismaClient, encryptionKey: string | 
     .filter((d): d is { dataset: ZetarisDataset; sql: string } => d.sql !== null);
   const byName = new Map(usable.map((d) => [d.dataset.name, d]));
   const done = new Map<string, Promise<SourceDoc | null>>();
-  let apiKey: string | null = null;
+  let auth: ZetarisAuth | null = null;
 
   const run = async (name: string): Promise<SourceDoc | null> => {
     const d = byName.get(name);
     if (!d) return null;
-    apiKey ??= decryptToken(connection.accessTokenEnc!, encryptionKey);
+    auth ??= decodeZetarisSecret(decryptToken(connection.accessTokenEnc!, encryptionKey));
     let table: string;
     let rows: number;
     try {
-      const result = await zetarisQuery(config, apiKey, d.sql, { limit: ROWS, timeoutMs: QUERY_TIMEOUT_MS });
+      const result = await zetarisQuery(config, auth, d.sql, { limit: ROWS, timeoutMs: QUERY_TIMEOUT_MS });
       table = renderTable(result);
       rows = result.rows.length;
     } catch (err) {

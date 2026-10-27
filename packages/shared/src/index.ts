@@ -548,6 +548,10 @@ export interface ZetarisDto {
   /** The engine's REST base (…/api/v1.0) or the web app's address. */
   restUrl: string | null;
   zetarisOrgId: string | null;
+  /** How Kept signs in: an API key, or a Zetaris user's email and password. */
+  signIn: "api_key" | "password" | null;
+  /** The email Kept signs in with, for "password". */
+  username: string | null;
   lastError: string | null;
   datasets: ZetarisDatasetDto[];
   /** Parameters a dataset can use. */
@@ -556,9 +560,13 @@ export interface ZetarisDto {
 
 export interface ZetarisConnectInput {
   restUrl: string;
-  zetarisOrgId: string;
-  /** Required the first time; left out to keep the stored key. */
+  /** Needed with an API key; with an email and password, Zetaris reports it on sign-in. */
+  zetarisOrgId?: string;
+  /** Sign in with an API key... */
   apiKey?: string;
+  /** ...or with a Zetaris user's email and password. Left out to keep what's stored. */
+  username?: string;
+  password?: string;
 }
 
 export interface ZetarisDatasetInput {

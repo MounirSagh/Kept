@@ -9,7 +9,8 @@
       "type": "oauth",
       "redirectUrls": [
         "https://granulative-rayford-unwarranted.ngrok-free.dev/oauth/callback",
-        "http://localhost:5173/oauth/callback"
+        "http://localhost:5173/oauth/callback",
+        "https://app-production-79555.up.railway.app/oauth/callback"
       ],
       "requiredScopes": [
         "oauth",

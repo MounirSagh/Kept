@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { bindDataset, paramsProblem, parseResult, readOnlyProblem, renderTable, zetarisQuery } from "../src/zetaris.js";
+import {
+  bindDataset, decodeZetarisSecret, encodeZetarisSecret, gatewayOrigin, paramsProblem, parseResult, readOnlyProblem, renderTable, zetarisQuery,
+} from "../src/zetaris.js";
 import { fakeFetch } from "./fake.js";
 
 describe("Zetaris queries", () => {
@@ -58,5 +60,47 @@ describe("datasets", () => {
   it("renders a table the model can quote", () => {
     expect(renderTable({ columns: ["month", "active"], rows: [["2026-10", 74], ["2026-09", null]] })).toBe("month | active\n2026-10 | 74\n2026-09 | ");
     expect(renderTable({ columns: ["a"], rows: [] })).toBe("a\n(no rows)");
+  });
+});
+
+describe("signing in with email and password", () => {
+  const jwt = (claims: object) => `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
+
+  it("finds the web app for a cluster address", () => {
+    expect(gatewayOrigin("https://api.abc.cloud.zetaris.com/api/v1.0")).toBe("https://new-ui.abc.cloud.zetaris.com");
+    expect(gatewayOrigin("https://new-ui.abc.cloud.zetaris.com/login")).toBe("https://new-ui.abc.cloud.zetaris.com");
+    expect(gatewayOrigin("http://localhost:3000/")).toBe("http://localhost:3000");
+  });
+
+  it("stores an API key as is and a sign-in as JSON", () => {
+    expect(decodeZetarisSecret(encodeZetarisSecret({ apiKey: "k1" }))).toEqual({ apiKey: "k1" });
+    expect(decodeZetarisSecret(encodeZetarisSecret({ username: "a@b.c", password: "p" }))).toEqual({ username: "a@b.c", password: "p" });
+  });
+
+  it("signs in, takes the organization from the session, and queries through the web app", async () => {
+    const f = fakeFetch([
+      { method: "POST", match: ["https://new-ui.c1.cloud.zetaris.com/api/auth/login"], json: { idToken: jwt({ exp: Date.now() / 1000 + 3600 }), orgId: 7 } },
+      { method: "POST", match: ["https://new-ui.c1.cloud.zetaris.com/api/proxy/sql-editor/sqls/run-query"], json: { headers: [{ name: "one" }], data: [[1]] } },
+    ]);
+    const res = await zetarisQuery({ restUrl: "https://api.c1.cloud.zetaris.com/api/v1.0", orgId: "" }, { username: "m@x.com", password: "pw" }, "SELECT 1", { fetch: f.fetch });
+    expect(res).toEqual({ columns: ["one"], rows: [[1]] });
+    expect(JSON.parse(f.calls[0]!.body!)).toEqual({ username: "m@x.com", password: "pw" });
+    expect(f.calls[1]!.headers).toMatchObject({ "X-Org-ID": "7" });
+    expect(f.calls[1]!.headers.Authorization).toMatch(/^Bearer h\./);
+  });
+
+  it("signs in again when the session ended, and explains a refused sign-in", async () => {
+    const f = fakeFetch([
+      { method: "POST", match: ["c2.cloud.zetaris.com/api/auth/login"], json: { idToken: jwt({ orgId: 3 }) } },
+      { method: "POST", match: ["c2.cloud.zetaris.com/api/proxy/"], status: 401, text: "expired", times: 1 },
+      { method: "POST", match: ["c2.cloud.zetaris.com/api/proxy/"], json: { data: [[1]] } },
+    ]);
+    await zetarisQuery({ restUrl: "https://new-ui.c2.cloud.zetaris.com", orgId: "" }, { username: "m@x.com", password: "pw" }, "SELECT 1", { fetch: f.fetch });
+    expect(f.calls.filter((c) => c.url.includes("/api/auth/login"))).toHaveLength(2);
+    expect(f.calls[1]!.headers).toMatchObject({ "X-Org-ID": "3" });
+
+    const refused = fakeFetch([{ method: "POST", match: ["/api/auth/login"], status: 404, json: { msg: "Not Allowed" } }]);
+    await expect(zetarisQuery({ restUrl: "https://new-ui.c3.cloud.zetaris.com", orgId: "" }, { username: "m@x.com", password: "bad" }, "SELECT 1", { fetch: refused.fetch }))
+      .rejects.toThrow("Zetaris refused the sign-in (Not Allowed)");
   });
 });
